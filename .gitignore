@@ -1,0 +1,23 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+.trae/
+# React Native
+.expo/
+.android/
+.ios/
+*.keystore
+
+# Rails
+log/
+tmp/
+.env
+.env.*
+storage/
+
+# OS
+.DS_Store
+Thumbs.db

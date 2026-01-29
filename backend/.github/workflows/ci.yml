@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+jobs:
+  scan_ruby:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: backend/.ruby-version
+
+      - name: Scan for common Rails security vulnerabilities using static analysis
+        working-directory: backend
+        run: bundle install --jobs 4 --retry 3
+
+      - name: Scan for common Rails security vulnerabilities using static analysis
+        working-directory: backend
+        run: bin/brakeman --no-pager
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: backend/.ruby-version
+
+      - name: Lint code for consistent style
+        working-directory: backend
+        run: bundle install --jobs 4 --retry 3
+
+      - name: Lint code for consistent style
+        working-directory: backend
+        run: bin/rubocop -f github
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: backend/.ruby-version
+
+      - name: Install gems
+        working-directory: backend
+        run: bundle install --jobs 4 --retry 3
+
+      - name: Run tests
+        working-directory: backend
+        run: bundle exec rspec
