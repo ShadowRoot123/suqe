@@ -16,6 +16,9 @@ Rails.application.routes.draw do
 
       post "users/invite", to: "users#invite"
       post "users/accept_invite", to: "users#accept_invite"
+
+      post "sync/push", to: "sync#push"
+      get "sync/pull", to: "sync#pull"
     end
   end
 
