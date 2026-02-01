@@ -1,9 +1,39 @@
-# This file should ensure the existence of records required to run the application in every environment (production,
-# development, test). The code here should be idempotent so that it can be executed at any point in every environment.
-# The data can then be loaded with the bin/rails db:seed command (or created alongside the database with db:setup).
-#
-# Example:
-#
-#   ["Action", "Comedy", "Drama", "Horror"].each do |genre_name|
-#     MovieGenre.find_or_create_by!(name: genre_name)
-#   end
+permission_keys = %w[
+  org.manage
+  users.invite
+  users.manage_roles
+  catalog.read
+  catalog.write
+  catalog.import_export
+  locations.read
+  locations.write
+  inventory.read
+  inventory.adjust
+  inventory.view_movements
+  inventory.low_stock_config
+  purchasing.read
+  purchasing.write
+  purchasing.receive
+  pos.sell
+  pos.apply_discount
+  pos.void_sale
+  pos.refund
+  transfers.create
+  transfers.approve
+  transfers.dispatch
+  transfers.receive
+  reports.view
+  reports.export
+  settings.tax_config
+  settings.receipt_config
+]
+
+connection = ActiveRecord::Base.connection
+
+permission_keys.each do |key|
+  connection.execute <<~SQL
+    INSERT INTO permissions (id, key)
+    VALUES (gen_random_uuid(), #{connection.quote(key)})
+    ON CONFLICT (key) DO NOTHING;
+  SQL
+end

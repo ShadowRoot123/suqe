@@ -18,9 +18,9 @@ default: &default
   # For details on connection pooling, see Rails configuration guide
   # https://guides.rubyonrails.org/configuring.html#database-pooling
   pool: <%= ENV.fetch("RAILS_MAX_THREADS") { 5 } %>
-  host: <%= ENV["PGHOST"] %>
-  port: <%= ENV["PGPORT"] %>
-  username: <%= ENV["PGUSER"] %>
+  host: <%= ENV["PGHOST"] || (Gem.win_platform? ? "127.0.0.1" : nil) %>
+  port: <%= ENV["PGPORT"] || (Gem.win_platform? ? 5433 : nil) %>
+  username: <%= ENV["PGUSER"] || (Gem.win_platform? ? "postgres" : nil) %>
   password: <%= ENV["PGPASSWORD"] %>
   url: <%= ENV["DATABASE_URL"] if ENV["DATABASE_URL"] && !ENV["DATABASE_URL"].empty? %>
 
@@ -87,8 +87,6 @@ production:
   primary: &primary_production
     <<: *default
     database: backend_production
-    username: backend
-    password: <%= ENV["BACKEND_DATABASE_PASSWORD"] %>
   cache:
     <<: *primary_production
     database: backend_production_cache

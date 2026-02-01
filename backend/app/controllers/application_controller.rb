@@ -36,7 +36,36 @@ class ApplicationController < ActionController::API
     render_error(code: "not_found", message: "Route not found", status: :not_found)
   end
 
+  def current_user
+    @current_user
+  end
+
+  def current_organization
+    @current_organization
+  end
+
   private
+
+  def authenticate!
+    header = request.authorization.to_s
+    token = header.delete_prefix("Bearer ").strip
+
+    payload = TokenService.verify_access_token(token)
+    return render_error(code: "unauthorized", message: "Unauthorized", status: :unauthorized) if payload.blank?
+
+    user = User.find_by(id: payload[:user_id], org_id: payload[:org_id])
+    return render_error(code: "unauthorized", message: "Unauthorized", status: :unauthorized) if user.blank?
+    return render_error(code: "unauthorized", message: "Unauthorized", status: :unauthorized) if user.status == "disabled"
+
+    @current_user = user
+    @current_organization = Organization.find(user.org_id)
+  end
+
+  def require_permission!(permission_key)
+    return if current_user.roles.joins(:permissions).where(permissions: { key: permission_key }).exists?
+
+    render_error(code: "forbidden", message: "Forbidden", status: :forbidden)
+  end
 
   def set_request_id_header
     response.set_header("X-Request-Id", request.request_id)

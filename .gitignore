@@ -17,6 +17,7 @@ tmp/
 .env
 .env.*
 storage/
+backend/config/master.key
 
 # OS
 .DS_Store

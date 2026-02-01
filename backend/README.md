@@ -20,6 +20,15 @@ Rails API backend for the offline-first Inventory, Sales & POS system.
   - `bundle install --local`
   - `bundle exec rails server`
 
+## Local Postgres
+
+- Install PostgreSQL 14+ and make sure it is running.
+- On Windows, the app defaults to `127.0.0.1:5432` and `postgres` unless you override `PGHOST`/`PGPORT`/`PGUSER`.
+- If your `postgres` user has a password, set it (PowerShell):
+  - `$env:PGPASSWORD = "<password>"`
+- Prepare DB (creates db + runs migrations + seeds):
+  - `bundle exec rails db:prepare`
+
 ## Schema source of truth
 
 - Product-level canonical schema: `docs/db/schema.sql` at the repo root.
@@ -28,4 +37,7 @@ Rails API backend for the offline-first Inventory, Sales & POS system.
 ## Tests
 
 - Run request/service specs:
+  - `$env:RAILS_ENV = "test"`
+  - `$env:PGPASSWORD = "<password>"`
+  - `bundle exec rails db:prepare`
   - `bundle exec rspec`
