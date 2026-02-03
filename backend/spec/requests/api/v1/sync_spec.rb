@@ -87,6 +87,38 @@ RSpec.describe "OfflineSync", type: :request do
     )
   end
 
+  it "returns mixed outcomes in a single batch" do
+    org_body = create_org!
+    token = org_body.fetch("access_token")
+    org_id = org_body.dig("organization", "id")
+
+    post "/api/v1/sync/push", params: {
+      device_id: "device-1",
+      commands: [
+        { idempotency_key: "cmd-1", entity: "sale", operation: "create", payload: { foo: "bar" } }
+      ]
+    }, headers: auth_headers(token), as: :json
+    expect(response).to have_http_status(:ok)
+    expect(sync_outbox_count_for(org_id)).to eq(1)
+
+    post "/api/v1/sync/push", params: {
+      device_id: "device-1",
+      commands: [
+        { idempotency_key: "cmd-1", entity: "sale", operation: "create", payload: { foo: "bar" } },
+        { idempotency_key: "cmd-2", entity: "sale", operation: "create", payload: { foo: "bar" } },
+        { idempotency_key: "cmd-3", operation: "create", payload: {} }
+      ]
+    }, headers: auth_headers(token), as: :json
+
+    expect(response).to have_http_status(:ok)
+    body = JSON.parse(response.body)
+    outcomes = body.fetch("outcomes")
+    expect(outcomes[0]).to include("idempotency_key" => "cmd-1", "status" => "duplicate")
+    expect(outcomes[1]).to include("idempotency_key" => "cmd-2", "status" => "enqueued")
+    expect(outcomes[2]).to include("idempotency_key" => "cmd-3", "status" => "invalid")
+    expect(sync_outbox_count_for(org_id)).to eq(2)
+  end
+
   it "requires device_id and commands for sync push" do
     org_body = create_org!
     token = org_body.fetch("access_token")
@@ -112,6 +144,28 @@ RSpec.describe "OfflineSync", type: :request do
     expect(body.fetch("acks")).to eq([])
     expect(body.fetch("changes")).to eq([])
     expect(body.fetch("next_cursor")).to be_a(String)
+  end
+
+  it "validates cursor format" do
+    org_body = create_org!
+    token = org_body.fetch("access_token")
+
+    get "/api/v1/sync/pull", params: { cursor: "not-a-time" }, headers: auth_headers(token)
+    expect(response).to have_http_status(:unprocessable_entity)
+    body = JSON.parse(response.body)
+    expect(body.fetch("code")).to eq("validation_error")
+    expect(body.dig("details", "cursor")).to be_present
+  end
+
+  it "clamps limit to a safe range" do
+    org_body = create_org!
+    token = org_body.fetch("access_token")
+
+    get "/api/v1/sync/pull", params: { limit: 0 }, headers: auth_headers(token)
+    expect(response).to have_http_status(:ok)
+
+    get "/api/v1/sync/pull", params: { limit: 10_000 }, headers: auth_headers(token)
+    expect(response).to have_http_status(:ok)
   end
 
   it "returns acknowledgements for processed commands" do
@@ -182,5 +236,25 @@ RSpec.describe "OfflineSync", type: :request do
 
     body = JSON.parse(response.body)
     expect(body.fetch("acks")).to include(a_hash_including("idempotency_key" => "cmd-1", "status" => "failed"))
+  end
+
+  it "does not reprocess already applied items" do
+    org_body = create_org!
+    token = org_body.fetch("access_token")
+    org_id = org_body.dig("organization", "id")
+
+    post "/api/v1/sync/push", params: {
+      device_id: "device-1",
+      commands: [
+        { idempotency_key: "cmd-1", entity: "sale", operation: "create", payload: { foo: "bar" } }
+      ]
+    }, headers: auth_headers(token), as: :json
+    expect(response).to have_http_status(:ok)
+
+    result = OfflineSync::ProcessPending.call(org_id: org_id)
+    expect(result.fetch(:processed_ids).length).to eq(1)
+
+    result = OfflineSync::ProcessPending.call(org_id: org_id)
+    expect(result.fetch(:processed_ids).length).to eq(0)
   end
 end
