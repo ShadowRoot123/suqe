@@ -1,0 +1,26 @@
+{
+  "expo": {
+    "name": "MyShop",
+    "slug": "myshop-mobile",
+    "scheme": "myshop",
+    "plugins": [
+      "expo-router",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow MyShop to access your camera to scan barcodes."
+        }
+      ]
+    ],
+    "ios": {
+      "infoPlist": {
+        "NSCameraUsageDescription": "Allow MyShop to access your camera to scan barcodes."
+      }
+    },
+    "android": {
+      "permissions": [
+        "CAMERA"
+      ]
+    }
+  }
+}
