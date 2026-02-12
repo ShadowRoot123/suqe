@@ -8,6 +8,5 @@ export default function Index() {
   if (isHydrating) return null;
 
   if (!session) return <Redirect href="/(auth)/welcome" />;
-  return <Redirect href="/(tabs)/sync" />;
+  return <Redirect href="/(tabs)/dashboard" />;
 }
-

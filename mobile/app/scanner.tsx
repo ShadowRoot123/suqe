@@ -43,7 +43,7 @@ export default function Scanner() {
         onBarcodeScanned={({ data }) => {
           if (scanned) return;
           setScanned(true);
-          router.replace({ pathname: "/(tabs)/catalog", params: { barcode: data } });
+          router.replace({ pathname: "/(tabs)/products", params: { barcode: data } });
         }}
       />
       <SafeAreaView style={{ position: "absolute", left: 0, right: 0, bottom: 0, padding: 16 }}>
@@ -57,4 +57,3 @@ export default function Scanner() {
     </View>
   );
 }
-

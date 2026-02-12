@@ -1,3 +1,5 @@
+import "react-native-gesture-handler";
+
 import { Stack } from "expo-router";
 
 import { AppProviders } from "@/providers/AppProviders";

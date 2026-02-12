@@ -52,9 +52,18 @@ RSpec.describe "AuthOrg", type: :request do
     org_body = JSON.parse(response.body)
     org_id = org_body.dig("organization", "id")
 
-    post "/api/v1/auth/login", params: { org_id: org_id, email: "owner@example.com", password: "secret123" }, as: :json
+    post "/api/v1/auth/login", params: { email: "owner@example.com", password: "secret123" }, as: :json
+    if response.status == 409
+      conflict = JSON.parse(response.body)
+      expect(conflict.fetch("code")).to eq("multiple_organizations")
+      post "/api/v1/auth/login", params: { org_id: org_id, email: "owner@example.com", password: "secret123" }, as: :json
+    end
+
     expect(response).to have_http_status(:ok)
-    token = JSON.parse(response.body).fetch("access_token")
+    login_body = JSON.parse(response.body)
+    token = login_body.fetch("access_token")
+    expect(login_body.fetch("org_id")).to eq(org_id)
+    expect(login_body.fetch("email")).to eq("owner@example.com")
 
     post "/api/v1/users/invite",
          params: { email: "staff@example.com", name: "Staff" },

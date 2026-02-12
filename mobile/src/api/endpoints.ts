@@ -31,8 +31,8 @@ export type CreateOrgRequest = {
 
 export type CreateOrgResponse = { organization: Organization; user: User; access_token: string };
 
-export type LoginRequest = { org_id: string; email: string; password: string };
-export type LoginResponse = { access_token: string };
+export type LoginRequest = { org_id?: string; email: string; password: string };
+export type LoginResponse = { access_token: string; org_id: string; email: string };
 
 export type SyncCommand = {
   idempotency_key: string;

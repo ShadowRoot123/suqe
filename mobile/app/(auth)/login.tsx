@@ -3,48 +3,61 @@ import React from "react";
 import { Alert, Pressable, SafeAreaView, Text, TextInput, View } from "react-native";
 
 import { apiForSession } from "@/api/endpoints";
+import { ApiError } from "@/api/errors";
 import { useSession } from "@/auth/session";
+
+type OrganizationChoice = { id: string; name: string };
 
 export default function Login() {
   const { setSession } = useSession();
   const [isSubmitting, setIsSubmitting] = React.useState(false);
 
-  const [orgId, setOrgId] = React.useState("");
   const [email, setEmail] = React.useState("");
   const [password, setPassword] = React.useState("");
+  const [orgChoices, setOrgChoices] = React.useState<OrganizationChoice[] | null>(null);
+  const [selectedOrgId, setSelectedOrgId] = React.useState<string | null>(null);
 
   const submit = React.useCallback(async () => {
     if (isSubmitting) return;
-    if (!orgId.trim() || !email.trim() || !password) {
-      Alert.alert("Missing fields", "org_id, email, and password are required.");
+    if (!email.trim() || !password) {
+      Alert.alert("Missing fields", "Email and password are required.");
       return;
     }
 
     setIsSubmitting(true);
     try {
       const api = apiForSession(null);
-      const res = await api.login({ org_id: orgId.trim(), email: email.trim(), password });
-      await setSession({ accessToken: res.access_token, orgId: orgId.trim(), email: email.trim() });
-      router.replace("/(tabs)/sync");
+      const res = await api.login({
+        org_id: selectedOrgId ?? undefined,
+        email: email.trim(),
+        password,
+      });
+      setOrgChoices(null);
+      setSelectedOrgId(null);
+      await setSession({ accessToken: res.access_token, orgId: res.org_id, email: res.email });
+      router.replace("/(tabs)/dashboard");
     } catch (e) {
-      Alert.alert("Login failed", e instanceof Error ? e.message : "Unknown error");
+      if (e instanceof ApiError && e.code === "multiple_organizations") {
+        const raw = (e.details as any)?.organizations;
+        if (Array.isArray(raw) && raw.every((o) => o && typeof o.id === "string" && typeof o.name === "string")) {
+          setOrgChoices(raw as OrganizationChoice[]);
+          Alert.alert("Select organization", "Choose which organization you want to sign in to.");
+        } else {
+          Alert.alert("Login failed", "Multiple organizations found for this email. Please contact support.");
+        }
+      } else {
+        Alert.alert("Login failed", e instanceof Error ? e.message : "Unknown error");
+      }
     } finally {
       setIsSubmitting(false);
     }
-  }, [isSubmitting, orgId, email, password, setSession]);
+  }, [isSubmitting, selectedOrgId, email, password, setSession]);
 
   return (
     <SafeAreaView style={{ flex: 1, padding: 16, gap: 12 }}>
       <Text style={{ fontSize: 18, fontWeight: "700" }}>Login</Text>
 
       <View style={{ gap: 8 }}>
-        <TextInput
-          placeholder="Organization ID (org_id)"
-          value={orgId}
-          onChangeText={setOrgId}
-          autoCapitalize="none"
-          style={{ borderWidth: 1, borderColor: "#ddd", borderRadius: 10, padding: 12 }}
-        />
         <TextInput
           placeholder="Email"
           value={email}
@@ -62,6 +75,32 @@ export default function Login() {
         />
       </View>
 
+      {orgChoices ? (
+        <View style={{ gap: 8 }}>
+          <Text style={{ fontWeight: "700" }}>Organization</Text>
+          {orgChoices.map((org) => (
+            <Pressable
+              key={org.id}
+              onPress={() => {
+                setSelectedOrgId(org.id);
+                void submit();
+              }}
+              disabled={isSubmitting}
+              style={{
+                padding: 14,
+                borderRadius: 10,
+                borderWidth: 1,
+                borderColor: selectedOrgId === org.id ? "#111" : "#ddd",
+                backgroundColor: selectedOrgId === org.id ? "#f1f1f1" : "white",
+              }}
+            >
+              <Text style={{ fontWeight: "700" }}>{org.name}</Text>
+              <Text style={{ color: "#666", marginTop: 4 }}>{org.id}</Text>
+            </Pressable>
+          ))}
+        </View>
+      ) : null}
+
       <Pressable
         onPress={submit}
         disabled={isSubmitting}
@@ -78,4 +117,3 @@ export default function Login() {
     </SafeAreaView>
   );
 }
-

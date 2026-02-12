@@ -30,7 +30,7 @@ export default function CreateOrg() {
       });
 
       await setSession({ accessToken: res.access_token, orgId: res.organization.id, email: res.user.email });
-      router.replace("/(tabs)/sync");
+      router.replace("/(tabs)/dashboard");
     } catch (e) {
       Alert.alert("Create org failed", e instanceof Error ? e.message : "Unknown error");
     } finally {
@@ -90,4 +90,3 @@ export default function CreateOrg() {
     </SafeAreaView>
   );
 }
-
