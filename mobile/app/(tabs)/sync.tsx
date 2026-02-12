@@ -4,7 +4,7 @@ import { Alert, Pressable, SafeAreaView, Text, View } from "react-native";
 import { apiForSession } from "@/api/endpoints";
 import { useSession } from "@/auth/session";
 import { getApiBaseUrl } from "@/config/apiBaseUrl";
-import { getSyncCursor, pullAcks, pushPending, syncNow } from "@/sync/syncEngine";
+import { getLastSyncChanges, getSyncCursor, pullAcks, pushPending, syncNow } from "@/sync/syncEngine";
 import { outboxCount } from "@/sync/outbox";
 
 export default function SyncScreen() {
@@ -12,11 +12,13 @@ export default function SyncScreen() {
   const [cursor, setCursor] = React.useState<string | null>(null);
   const [queueSize, setQueueSize] = React.useState<number>(0);
   const [healthOk, setHealthOk] = React.useState<boolean | null>(null);
+  const [lastChanges, setLastChanges] = React.useState<any[]>([]);
   const [busy, setBusy] = React.useState(false);
 
   const refresh = React.useCallback(async () => {
     setQueueSize(await outboxCount("pending"));
     setCursor(await getSyncCursor());
+    setLastChanges(await getLastSyncChanges());
   }, []);
 
   React.useEffect(() => {
@@ -93,6 +95,12 @@ export default function SyncScreen() {
         <Text style={{ color: "#444" }}>Health: {healthOk === null ? "…" : healthOk ? "OK" : "FAIL"}</Text>
         <Text style={{ color: "#444" }}>Pending outbox: {queueSize}</Text>
         <Text style={{ color: "#444" }}>Cursor: {cursor ?? "(none)"}</Text>
+        <Text style={{ color: "#444" }}>Last changes: {lastChanges.length}</Text>
+        {lastChanges.slice(-3).map((c) => (
+          <Text key={String(c.id)} style={{ color: "#666" }}>
+            {String(c.action)} · {String(c.entity ?? "-")} · {String(c.metadata?.idempotency_key ?? "-")}
+          </Text>
+        ))}
       </View>
 
       <View style={{ gap: 10, marginTop: 8 }}>
@@ -141,4 +149,3 @@ export default function SyncScreen() {
     </SafeAreaView>
   );
 }
-

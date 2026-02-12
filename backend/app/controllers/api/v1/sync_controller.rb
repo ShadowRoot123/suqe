@@ -49,6 +49,8 @@ module Api
         limit = 1 if limit < 1
         limit = 500 if limit > 500
 
+        OfflineSync::ProcessPending.call(org_id: current_organization.id, limit: limit)
+
         since = cursor.present? ? Time.iso8601(cursor) : nil
 
         scope = SyncOutbox
@@ -67,9 +69,27 @@ module Api
           }
         end
 
-        next_cursor = (items.last&.updated_at || Time.current).iso8601(6)
+        log_scope = AuditLog.where(org_id: current_organization.id).order(created_at: :asc)
+        log_scope = log_scope.where("created_at > ?", since) if since.present?
 
-        render json: { cursor: cursor, next_cursor: next_cursor, changes: [], acks: acks }
+        logs = log_scope.limit(limit)
+        changes = logs.map do |log|
+          {
+            id: log.id,
+            action: log.action,
+            entity: log.entity,
+            entity_id: log.entity_id,
+            created_at: log.created_at.iso8601(6),
+            metadata: log.metadata
+          }
+        end
+
+        last_ack_time = items.last&.updated_at
+        last_change_time = logs.last&.created_at
+        next_cursor_time = [last_ack_time, last_change_time, Time.current].compact.max
+        next_cursor = next_cursor_time.iso8601(6)
+
+        render json: { cursor: cursor, next_cursor: next_cursor, changes: changes, acks: acks }
       rescue ArgumentError
         render_error(
           code: "validation_error",

@@ -46,7 +46,16 @@ export type SyncPushOutcome = { idempotency_key?: string; status: "enqueued" | "
 export type SyncPushResponse = { received_at: string; outcomes: SyncPushOutcome[] };
 
 export type SyncPullAck = { idempotency_key: string; status: "applied" | "failed"; outbox_id: string; processed_at: string };
-export type SyncPullResponse = { cursor: string | null; next_cursor: string; changes: unknown[]; acks: SyncPullAck[] };
+export type SyncPullChange = {
+  id: string;
+  action: string;
+  entity: string | null;
+  entity_id: string | null;
+  created_at: string;
+  metadata: Record<string, unknown>;
+};
+
+export type SyncPullResponse = { cursor: string | null; next_cursor: string; changes: SyncPullChange[]; acks: SyncPullAck[] };
 
 export function apiForSession(session: Session | null) {
   const client = createApiClient({ getAccessToken: () => session?.accessToken ?? null });
@@ -70,4 +79,3 @@ export function apiForSession(session: Session | null) {
     },
   };
 }
-
