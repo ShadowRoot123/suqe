@@ -14,6 +14,22 @@ class ApplicationController < ActionController::API
     )
   end
 
+  rescue_from ActiveRecord::RecordNotUnique do |_error|
+    render_error(
+      code: "not_unique",
+      message: "Record already exists",
+      status: :conflict
+    )
+  end
+
+  rescue_from ActiveRecord::InvalidForeignKey do |_error|
+    render_error(
+      code: "invalid_foreign_key",
+      message: "Record is referenced by other records",
+      status: :conflict
+    )
+  end
+
   rescue_from ActionController::ParameterMissing do |error|
     render_error(
       code: "parameter_missing",

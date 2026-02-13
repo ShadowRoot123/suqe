@@ -90,12 +90,21 @@ export async function createCategoryOffline(name: string, parentId?: string | nu
   return id;
 }
 
-export async function createProductOffline(args: { name: string; sku: string; barcode?: string }) {
+export async function createProductOffline(args: {
+  name: string;
+  sku: string;
+  barcode?: string;
+  category_id?: string | null;
+  status?: string;
+}) {
   const productId = makeUuid();
   const variantId = makeUuid();
   const now = new Date().toISOString();
 
-  await productsUpsert({ id: productId, name: args.name, status: "active", updated_at: now });
+  const status = args.status ?? "active";
+  const category_id = args.category_id ?? null;
+
+  await productsUpsert({ id: productId, name: args.name, category_id, status, updated_at: now });
   await variantsUpsert({
     id: variantId,
     product_id: productId,
@@ -112,7 +121,7 @@ export async function createProductOffline(args: { name: string; sku: string; ba
     idempotencyKey: productKey,
     entity: "product",
     operation: "create",
-    payload: { id: productId, name: args.name, status: "active" },
+    payload: { id: productId, name: args.name, category_id, status },
   });
 
   await outboxEnqueue({
@@ -131,6 +140,25 @@ export async function createProductOffline(args: { name: string; sku: string; ba
   });
 
   return { productId, variantId, productIdempotencyKey: productKey };
+}
+
+export async function updateProductOffline(args: {
+  id: string;
+  name: string;
+  category_id?: string | null;
+  status?: string;
+}) {
+  const now = new Date().toISOString();
+  const status = args.status ?? "active";
+  const category_id = args.category_id ?? null;
+
+  await productsUpsert({ id: args.id, name: args.name, category_id, status, updated_at: now });
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("prd"),
+    entity: "product",
+    operation: "update",
+    payload: { id: args.id, name: args.name, category_id, status },
+  });
 }
 
 async function applyChanges(changes: SyncPullChange[]) {

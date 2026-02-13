@@ -64,3 +64,19 @@ export async function productsDelete(id: string) {
   await db.runAsync("DELETE FROM products WHERE id = ?", [id]);
 }
 
+export async function productsList(): Promise<ProductRow[]> {
+  if (Platform.OS === "web") {
+    return webRead().slice().sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  }
+  const db = await getDb();
+  return await db.getAllAsync<ProductRow>("SELECT * FROM products ORDER BY updated_at DESC");
+}
+
+export async function productsGetById(id: string): Promise<ProductRow | null> {
+  if (Platform.OS === "web") {
+    return webRead().find((p) => p.id === id) ?? null;
+  }
+  const db = await getDb();
+  const row = await db.getFirstAsync<ProductRow>("SELECT * FROM products WHERE id = ? LIMIT 1", [id]);
+  return row ?? null;
+}
