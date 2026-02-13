@@ -1,16 +1,19 @@
 import { router, useLocalSearchParams } from "expo-router";
 import React from "react";
-import { Pressable, SafeAreaView, Text, TextInput, View } from "react-native";
+import { View } from "react-native";
 
 import { categoriesList } from "@/catalog/categories";
 import { variantsSearch } from "@/catalog/variants";
 import { getLastSyncChanges } from "@/sync/syncEngine";
 import { createCategoryOffline, createProductOffline } from "@/sync/syncEngine";
+import { BarChartCard } from "@/ui/charts";
+import { AppText, Button, Card, Chip, Screen, SectionHeader, Stack, TextField } from "@/ui/components";
+import { useDebouncedValue } from "@/ui/hooks/useDebouncedValue";
+import { useBreakpoint } from "@/ui/hooks/useBreakpoint";
+import { DataTable, FilterBar, useTableState } from "@/ui/table";
 
 export default function CatalogScreen() {
   const params = useLocalSearchParams<{ barcode?: string }>();
-  const [query, setQuery] = React.useState("");
-  const [debouncedQuery, setDebouncedQuery] = React.useState("");
   const [newCategoryName, setNewCategoryName] = React.useState("");
   const [newProductName, setNewProductName] = React.useState("");
   const [newProductSku, setNewProductSku] = React.useState("");
@@ -22,12 +25,7 @@ export default function CatalogScreen() {
   const [lastChanges, setLastChanges] = React.useState<{ id: string; entity: string; operation: string; status: string }[]>(
     []
   );
-
-  React.useEffect(() => {
-    if (typeof params.barcode === "string" && params.barcode.length > 0) {
-      setQuery(params.barcode);
-    }
-  }, [params.barcode]);
+  const bp = useBreakpoint();
 
   const refresh = React.useCallback(async () => {
     const rows = await categoriesList();
@@ -57,10 +55,34 @@ export default function CatalogScreen() {
     };
   }, []);
 
+  const variantsTable = useTableState(results, {
+    queryMode: "external",
+    filterFns: {
+      hasBarcode: (row, value) => (value === true ? Boolean(row.barcode) : true),
+      hasName: (row, value) => (value === true ? Boolean(row.product_name && row.product_name.trim()) : true),
+    },
+    sortValueBy: {
+      product_name: (r) => r.product_name ?? "",
+      sku: (r) => r.sku,
+      barcode: (r) => r.barcode ?? "",
+    },
+    initial: { pageSize: 25 },
+  });
+  const setVariantQuery = variantsTable.setQuery;
+
   React.useEffect(() => {
-    const handle = setTimeout(() => setDebouncedQuery(query), 200);
-    return () => clearTimeout(handle);
-  }, [query]);
+    if (typeof params.barcode === "string" && params.barcode.length > 0) {
+      setVariantQuery(params.barcode);
+    }
+  }, [params.barcode, setVariantQuery]);
+
+  const categoriesTable = useTableState(categories, {
+    getSearchText: (c) => c.name,
+    sortValueBy: { name: (c) => c.name },
+    initial: { pageSize: 25 },
+  });
+
+  const debouncedQuery = useDebouncedValue(variantsTable.state.query, 200);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -70,7 +92,7 @@ export default function CatalogScreen() {
         if (!cancelled) setResults([]);
         return;
       }
-      const hits = await variantsSearch(q, 20);
+      const hits = await variantsSearch(q, 50);
       if (cancelled) return;
       setResults(
         hits.map((h) => ({
@@ -86,132 +108,213 @@ export default function CatalogScreen() {
     };
   }, [debouncedQuery]);
 
-  const filtered = categories.filter((c) => c.name.toLowerCase().includes(query.toLowerCase()));
+  const showPaged = !bp.isMobile;
+  const variantRows = showPaged ? variantsTable.pagedRows : variantsTable.rows;
 
   return (
-    <SafeAreaView style={{ flex: 1, padding: 16, gap: 12 }}>
-      <Text style={{ fontSize: 18, fontWeight: "700" }}>Catalog</Text>
+    <Screen scroll>
+      <Stack gap={16}>
+        <AppText variant="h1">Catalog</AppText>
 
-      <View style={{ gap: 8 }}>
-        <TextInput
-          placeholder="Search SKU / name / barcode"
-          value={query}
-          onChangeText={setQuery}
-          autoCapitalize="none"
-          style={{ borderWidth: 1, borderColor: "#ddd", borderRadius: 10, padding: 12 }}
-        />
-        <Pressable
-          onPress={() => router.push("/scanner")}
-          style={{ padding: 14, backgroundColor: "#111", borderRadius: 10, alignItems: "center" }}
-        >
-          <Text style={{ color: "white", fontWeight: "600" }}>Scan barcode</Text>
-        </Pressable>
-      </View>
+        <Card>
+          <Stack gap={12}>
+            <SectionHeader
+              title="Search"
+              right={<Button title="Scan barcode" variant="secondary" onPress={() => router.push("/scanner")} />}
+            />
 
-      <View style={{ gap: 8, marginTop: 8 }}>
-        <Text style={{ fontSize: 16, fontWeight: "700" }}>Products (offline)</Text>
-        <View style={{ gap: 8 }}>
-          <TextInput
-            placeholder="Product name"
-            value={newProductName}
-            onChangeText={setNewProductName}
-            autoCapitalize="words"
-            style={{ borderWidth: 1, borderColor: "#ddd", borderRadius: 10, padding: 12 }}
+            <FilterBar
+              searchValue={variantsTable.state.query}
+              onSearchChange={variantsTable.setQuery}
+              onReset={() => {
+                variantsTable.setQuery("");
+                variantsTable.clearFilters();
+              }}
+            >
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10 }}>
+                <Chip
+                  label="Has barcode"
+                  selected={variantsTable.state.filters.hasBarcode === true}
+                  onPress={() =>
+                    variantsTable.setFilter(
+                      "hasBarcode",
+                      variantsTable.state.filters.hasBarcode === true ? null : true
+                    )
+                  }
+                />
+                <Chip
+                  label="Has name"
+                  selected={variantsTable.state.filters.hasName === true}
+                  onPress={() =>
+                    variantsTable.setFilter("hasName", variantsTable.state.filters.hasName === true ? null : true)
+                  }
+                />
+              </View>
+            </FilterBar>
+          </Stack>
+        </Card>
+
+        <Stack gap={10}>
+          <SectionHeader title="Search results" />
+          <DataTable
+            columns={[
+              {
+                key: "product_name",
+                title: "Product",
+                minWidth: 240,
+                render: (r) => r.product_name ?? "-",
+                sortValue: (r) => r.product_name ?? "",
+              },
+              { key: "sku", title: "SKU", minWidth: 180, render: (r) => r.sku, sortValue: (r) => r.sku },
+              {
+                key: "barcode",
+                title: "Barcode",
+                minWidth: 200,
+                render: (r) => r.barcode ?? "-",
+                sortValue: (r) => r.barcode ?? "",
+              },
+            ]}
+            rows={variantRows}
+            getRowId={(r) => r.id}
+            sort={{ key: variantsTable.state.sortKey, dir: variantsTable.state.sortDir, onToggle: variantsTable.toggleSort }}
+            pagination={
+              showPaged
+                ? {
+                    page: variantsTable.state.page,
+                    pageSize: variantsTable.state.pageSize,
+                    totalRows: variantsTable.totalRows,
+                    onPageChange: variantsTable.setPage,
+                    onPageSizeChange: variantsTable.setPageSize,
+                  }
+                : undefined
+            }
+            emptyTitle={variantsTable.state.query.trim() ? "No results" : "Type to search"}
+            emptySubtitle={variantsTable.state.query.trim() ? undefined : "Search by SKU, barcode, or product name"}
           />
-          <TextInput
-            placeholder="SKU"
-            value={newProductSku}
-            onChangeText={setNewProductSku}
-            autoCapitalize="characters"
-            style={{ borderWidth: 1, borderColor: "#ddd", borderRadius: 10, padding: 12 }}
-          />
-          <TextInput
-            placeholder="Barcode (optional)"
-            value={newProductBarcode}
-            onChangeText={setNewProductBarcode}
-            autoCapitalize="none"
-            style={{ borderWidth: 1, borderColor: "#ddd", borderRadius: 10, padding: 12 }}
-          />
-          <Pressable
-            onPress={async () => {
-              const name = newProductName.trim();
-              const sku = newProductSku.trim();
-              const barcode = newProductBarcode.trim();
-              if (!name || !sku) return;
-              await createProductOffline({ name, sku, barcode: barcode.length ? barcode : undefined });
-              setNewProductName("");
-              setNewProductSku("");
-              setNewProductBarcode("");
-              setQuery(sku);
-            }}
-            style={{ padding: 14, backgroundColor: "#f1f1f1", borderRadius: 10, alignItems: "center" }}
-          >
-            <Text style={{ fontWeight: "600" }}>Add product (offline)</Text>
-          </Pressable>
+        </Stack>
+
+        <Card>
+          <Stack gap={12}>
+            <SectionHeader title="Products (offline)" />
+            <TextField
+              label="Product name"
+              value={newProductName}
+              onChangeText={setNewProductName}
+              autoCapitalize="words"
+              placeholder="e.g. Cola 330ml"
+            />
+            <TextField
+              label="SKU"
+              value={newProductSku}
+              onChangeText={setNewProductSku}
+              autoCapitalize="characters"
+              placeholder="e.g. COLA-330"
+            />
+            <TextField
+              label="Barcode (optional)"
+              value={newProductBarcode}
+              onChangeText={setNewProductBarcode}
+              autoCapitalize="none"
+              placeholder="e.g. 0123456789"
+            />
+            <Button
+              title="Add product (offline)"
+              variant="secondary"
+              onPress={async () => {
+                const name = newProductName.trim();
+                const sku = newProductSku.trim();
+                const barcode = newProductBarcode.trim();
+                if (!name || !sku) return;
+                await createProductOffline({ name, sku, barcode: barcode.length ? barcode : undefined });
+                setNewProductName("");
+                setNewProductSku("");
+                setNewProductBarcode("");
+                variantsTable.setQuery(sku);
+              }}
+            />
+          </Stack>
+        </Card>
+
+        <Card>
+          <Stack gap={12}>
+            <SectionHeader title="Last sync changes" />
+            {lastChanges.length === 0 ? (
+              <AppText muted>No changes yet</AppText>
+            ) : (
+              lastChanges.map((c) => (
+                <AppText key={c.id} muted>
+                  {c.entity} · {c.operation} · {c.status}
+                </AppText>
+              ))
+            )}
+          </Stack>
+        </Card>
+
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 12 }}>
+          <View style={{ width: bp.isMobile ? "100%" : bp.isTablet ? "100%" : "49%" }}>
+            <BarChartCard
+              title="Recent changes"
+              subtitle="Counts by status (last 8)"
+              data={[
+                { x: "ok", y: lastChanges.filter((c) => c.status === "ok").length },
+                { x: "applied", y: lastChanges.filter((c) => c.status === "applied").length },
+                { x: "other", y: lastChanges.filter((c) => c.status !== "ok" && c.status !== "applied").length },
+              ]}
+            />
+          </View>
         </View>
-      </View>
 
-      <View style={{ gap: 6 }}>
-        <Text style={{ fontSize: 16, fontWeight: "700" }}>Search results</Text>
-        {query.trim().length === 0 ? (
-          <Text style={{ color: "#666" }}>Type a SKU, barcode, or product name</Text>
-        ) : results.length === 0 ? (
-          <Text style={{ color: "#666" }}>No results</Text>
-        ) : (
-          results.map((r) => (
-            <Text key={r.id} style={{ color: "#666" }}>
-              {r.product_name ?? "-"} · {r.sku} · {r.barcode ?? "-"}
-            </Text>
-          ))
-        )}
-      </View>
+        <Card>
+          <Stack gap={12}>
+            <SectionHeader title="Categories" />
+            <FilterBar
+              searchValue={categoriesTable.state.query}
+              onSearchChange={categoriesTable.setQuery}
+              onReset={() => {
+                categoriesTable.setQuery("");
+                categoriesTable.clearFilters();
+              }}
+            />
 
-      <View style={{ gap: 6 }}>
-        <Text style={{ fontSize: 16, fontWeight: "700" }}>Last sync changes</Text>
-        {lastChanges.length === 0 ? (
-          <Text style={{ color: "#666" }}>No changes yet</Text>
-        ) : (
-          lastChanges.map((c) => (
-            <Text key={c.id} style={{ color: "#666" }}>
-              {c.entity} · {c.operation} · {c.status}
-            </Text>
-          ))
-        )}
-      </View>
+            <DataTable
+              columns={[{ key: "name", title: "Name", minWidth: 260, render: (c) => c.name, sortValue: (c) => c.name }]}
+              rows={bp.isMobile ? categoriesTable.rows : categoriesTable.pagedRows}
+              getRowId={(c) => c.id}
+              sort={{ key: categoriesTable.state.sortKey, dir: categoriesTable.state.sortDir, onToggle: categoriesTable.toggleSort }}
+              pagination={
+                bp.isMobile
+                  ? undefined
+                  : {
+                      page: categoriesTable.state.page,
+                      pageSize: categoriesTable.state.pageSize,
+                      totalRows: categoriesTable.totalRows,
+                      onPageChange: categoriesTable.setPage,
+                      onPageSizeChange: categoriesTable.setPageSize,
+                    }
+              }
+            />
 
-      <View style={{ gap: 8, marginTop: 8 }}>
-        <Text style={{ fontSize: 16, fontWeight: "700" }}>Categories</Text>
-        <View style={{ gap: 8 }}>
-          <TextInput
-            placeholder="New category name"
-            value={newCategoryName}
-            onChangeText={setNewCategoryName}
-            autoCapitalize="words"
-            style={{ borderWidth: 1, borderColor: "#ddd", borderRadius: 10, padding: 12 }}
-          />
-          <Pressable
-            onPress={async () => {
-              const name = newCategoryName.trim();
-              if (!name) return;
-              await createCategoryOffline(name);
-              setNewCategoryName("");
-              await refresh();
-            }}
-            style={{ padding: 14, backgroundColor: "#f1f1f1", borderRadius: 10, alignItems: "center" }}
-          >
-            <Text style={{ fontWeight: "600" }}>Add category (offline)</Text>
-          </Pressable>
-        </View>
-
-        <View style={{ gap: 6, marginTop: 6 }}>
-          <Text style={{ color: "#444" }}>Stored locally: {categories.length}</Text>
-          {filtered.slice(0, 20).map((c) => (
-            <Text key={c.id} style={{ color: "#666" }}>
-              {c.name}
-            </Text>
-          ))}
-        </View>
-      </View>
-    </SafeAreaView>
+            <TextField
+              label="New category name"
+              value={newCategoryName}
+              onChangeText={setNewCategoryName}
+              autoCapitalize="words"
+              placeholder="e.g. Beverages"
+            />
+            <Button
+              title="Add category (offline)"
+              variant="secondary"
+              onPress={async () => {
+                const name = newCategoryName.trim();
+                if (!name) return;
+                await createCategoryOffline(name);
+                setNewCategoryName("");
+                await refresh();
+              }}
+            />
+          </Stack>
+        </Card>
+      </Stack>
+    </Screen>
   );
 }
