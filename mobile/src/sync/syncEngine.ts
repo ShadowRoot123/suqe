@@ -1,8 +1,10 @@
 import { apiForSession, SyncCommand, SyncPullChange } from "@/api/endpoints";
 import { Session } from "@/auth/session";
 import { categoriesDelete, categoriesUpsert } from "@/catalog/categories";
+import { productGroupMembershipsDelete, productGroupMembershipsUpsert } from "@/catalog/productGroupMemberships";
+import { productGroupsDelete, productGroupsUpsert } from "@/catalog/productGroups";
 import { productsDelete, productsUpsert } from "@/catalog/products";
-import { variantsDelete, variantsUpsert } from "@/catalog/variants";
+import { variantsDelete, variantsGetById, variantsUpsert } from "@/catalog/variants";
 import { kvGet, kvSet } from "@/db/kv";
 import { getDeviceId } from "@/sync/device";
 import { makeIdempotencyKey } from "@/sync/idempotency";
@@ -161,6 +163,163 @@ export async function updateProductOffline(args: {
   });
 }
 
+export async function createVariantOffline(args: {
+  product_id: string;
+  sku: string;
+  barcode?: string | null;
+  attrs?: unknown;
+  price?: string | number | null;
+  cost_price?: string | number | null;
+}) {
+  const id = makeUuid();
+  const now = new Date().toISOString();
+
+  await variantsUpsert({
+    id,
+    product_id: args.product_id,
+    sku: args.sku,
+    barcode: args.barcode ?? null,
+    attrs: args.attrs ?? {},
+    price: args.price ?? "0",
+    cost_price: args.cost_price ?? "0",
+    updated_at: now,
+  });
+
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("var"),
+    entity: "variant",
+    operation: "create",
+    payload: {
+      id,
+      product_id: args.product_id,
+      sku: args.sku,
+      barcode: args.barcode ?? null,
+      attrs: args.attrs ?? {},
+      price: args.price ?? "0",
+      cost_price: args.cost_price ?? "0",
+    },
+  });
+
+  return id;
+}
+
+export async function updateVariantOffline(args: {
+  id: string;
+  product_id?: string;
+  sku?: string;
+  barcode?: string | null;
+  attrs?: unknown;
+  price?: string | number | null;
+  cost_price?: string | number | null;
+}) {
+  const now = new Date().toISOString();
+  const existing = await variantsGetById(args.id);
+  if (!existing) throw new Error("Variant not found");
+  const existingAttrs = (() => {
+    try {
+      return JSON.parse(existing.attrs_json) as unknown;
+    } catch {
+      return {};
+    }
+  })();
+
+  const next = {
+    id: args.id,
+    product_id: args.product_id === undefined ? existing.product_id : args.product_id,
+    sku: args.sku === undefined ? existing.sku : args.sku,
+    barcode: args.barcode === undefined ? existing.barcode : args.barcode,
+    attrs: args.attrs === undefined ? existingAttrs : args.attrs,
+    price: args.price === undefined ? existing.price : args.price,
+    cost_price: args.cost_price === undefined ? existing.cost_price : args.cost_price,
+    updated_at: now,
+  };
+
+  await variantsUpsert(next);
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("var"),
+    entity: "variant",
+    operation: "update",
+    payload: {
+      id: args.id,
+      product_id: next.product_id,
+      sku: next.sku,
+      barcode: next.barcode,
+      attrs: next.attrs,
+      price: next.price,
+      cost_price: next.cost_price,
+    },
+  });
+}
+
+export async function deleteVariantOffline(id: string) {
+  await variantsDelete(id);
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("var"),
+    entity: "variant",
+    operation: "delete",
+    payload: { id },
+  });
+}
+
+export async function createProductGroupOffline(name: string) {
+  const id = makeUuid();
+  const now = new Date().toISOString();
+
+  await productGroupsUpsert({ id, name, updated_at: now });
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("pg"),
+    entity: "product_group",
+    operation: "create",
+    payload: { id, name },
+  });
+
+  return id;
+}
+
+export async function updateProductGroupOffline(args: { id: string; name: string }) {
+  const now = new Date().toISOString();
+  await productGroupsUpsert({ id: args.id, name: args.name, updated_at: now });
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("pg"),
+    entity: "product_group",
+    operation: "update",
+    payload: { id: args.id, name: args.name },
+  });
+}
+
+export async function deleteProductGroupOffline(id: string) {
+  await productGroupsDelete(id);
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("pg"),
+    entity: "product_group",
+    operation: "delete",
+    payload: { id },
+  });
+}
+
+export async function addProductToGroupOffline(args: { product_group_id: string; product_id: string }) {
+  const id = makeUuid();
+  const now = new Date().toISOString();
+  await productGroupMembershipsUpsert({ id, product_group_id: args.product_group_id, product_id: args.product_id, updated_at: now });
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("pgm"),
+    entity: "product_group_membership",
+    operation: "create",
+    payload: { id, product_group_id: args.product_group_id, product_id: args.product_id },
+  });
+  return id;
+}
+
+export async function removeProductFromGroupOffline(membershipId: string) {
+  await productGroupMembershipsDelete(membershipId);
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("pgm"),
+    entity: "product_group_membership",
+    operation: "delete",
+    payload: { id: membershipId },
+  });
+}
+
 async function applyChanges(changes: SyncPullChange[]) {
   for (const change of changes) {
     if (change.action !== "sync.applied") continue;
@@ -214,6 +373,29 @@ async function applyChanges(changes: SyncPullChange[]) {
         cost_price: record?.cost_price ?? "0",
         updated_at: change.created_at,
       });
+      continue;
+    }
+
+    if (change.entity === "product_group") {
+      if (operation === "delete") {
+        await productGroupsDelete(id);
+        continue;
+      }
+      const name = String(record?.name ?? "");
+      if (!name) continue;
+      await productGroupsUpsert({ id, name, updated_at: change.created_at });
+      continue;
+    }
+
+    if (change.entity === "product_group_membership") {
+      if (operation === "delete") {
+        await productGroupMembershipsDelete(id);
+        continue;
+      }
+      const product_group_id = String(record?.product_group_id ?? "");
+      const product_id = String(record?.product_id ?? "");
+      if (!product_group_id || !product_id) continue;
+      await productGroupMembershipsUpsert({ id, product_group_id, product_id, updated_at: change.created_at });
     }
   }
 }

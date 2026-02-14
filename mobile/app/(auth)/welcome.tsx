@@ -2,11 +2,13 @@ import { Link } from "expo-router";
 import React from "react";
 import { SafeAreaView, Text, View } from "react-native";
 
+import { APP_NAME } from "@/shared/constants";
+
 export default function Welcome() {
   return (
     <SafeAreaView style={{ flex: 1, padding: 16, gap: 12 }}>
       <View style={{ gap: 6 }}>
-        <Text style={{ fontSize: 24, fontWeight: "700" }}>MyShop</Text>
+        <Text style={{ fontSize: 24, fontWeight: "700" }}>{APP_NAME}</Text>
         <Text style={{ color: "#444" }}>Offline-first inventory + sales</Text>
       </View>
 
@@ -33,4 +35,3 @@ export default function Welcome() {
     </SafeAreaView>
   );
 }
-

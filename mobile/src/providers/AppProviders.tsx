@@ -1,8 +1,10 @@
 import React from "react";
 import { SafeAreaView, Text } from "react-native";
+import { Provider } from "react-redux";
 
 import { SessionProvider } from "@/auth/session";
 import { migrate } from "@/db/db";
+import { store } from "@/store";
 
 export function AppProviders(props: { children: React.ReactNode }) {
   const [ready, setReady] = React.useState(false);
@@ -40,6 +42,9 @@ export function AppProviders(props: { children: React.ReactNode }) {
     );
   }
 
-  return <SessionProvider>{props.children}</SessionProvider>;
+  return (
+    <Provider store={store}>
+      <SessionProvider>{props.children}</SessionProvider>
+    </Provider>
+  );
 }
-

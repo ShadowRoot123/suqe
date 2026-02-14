@@ -5,6 +5,7 @@ import { Alert, Pressable, SafeAreaView, Text, TextInput, View } from "react-nat
 import { apiForSession } from "@/api/endpoints";
 import { ApiError } from "@/api/errors";
 import { useSession } from "@/auth/session";
+import { bootstrapCatalogIfNeeded } from "@/catalog/bootstrapCatalog";
 
 type OrganizationChoice = { id: string; name: string };
 
@@ -34,7 +35,11 @@ export default function Login() {
       });
       setOrgChoices(null);
       setSelectedOrgId(null);
-      await setSession({ accessToken: res.access_token, orgId: res.org_id, email: res.email });
+      const nextSession = { accessToken: res.access_token, orgId: res.org_id, email: res.email };
+      await setSession(nextSession);
+      try {
+        await bootstrapCatalogIfNeeded(nextSession);
+      } catch {}
       router.replace("/(tabs)/dashboard");
     } catch (e) {
       if (e instanceof ApiError && e.code === "multiple_organizations") {

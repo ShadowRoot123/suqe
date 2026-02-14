@@ -6,39 +6,22 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { apiForSession } from "@/api/endpoints";
 import { useSession } from "@/auth/session";
+import { useSyncBadges } from "@/features/sync";
 import { navGroups } from "@/navigation/navGroups";
-import { outboxCount } from "@/sync/outbox";
-import { getLastSyncChanges } from "@/sync/syncEngine";
+import { APP_NAME } from "@/shared/constants";
+import { getInitials } from "@/shared/utils";
 import { theme } from "@/ui/theme";
-
-function getInitials(label: string) {
-  const cleaned = label.trim();
-  if (!cleaned) return "?";
-  const parts = cleaned.split(/\s+/g).filter(Boolean);
-  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
-  return (parts[0][0] + parts[1][0]).toUpperCase();
-}
 
 export function AppDrawerContent(props: DrawerContentComponentProps) {
   const { session, clearSession } = useSession();
   const [busy, setBusy] = React.useState(false);
-  const [pendingCount, setPendingCount] = React.useState(0);
-  const [changesCount, setChangesCount] = React.useState(0);
+  const { pendingCount, changesCount, refresh } = useSyncBadges();
   const pathname = usePathname();
   const [expanded, setExpanded] = React.useState<Record<string, boolean>>({});
 
   React.useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const [pending, changes] = await Promise.all([outboxCount("pending"), getLastSyncChanges()]);
-      if (cancelled) return;
-      setPendingCount(pending);
-      setChangesCount(changes.length);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    refresh().catch(() => {});
+  }, [refresh]);
 
   const logout = React.useCallback(async () => {
     if (!session) return;
@@ -54,7 +37,7 @@ export function AppDrawerContent(props: DrawerContentComponentProps) {
     }
   }, [session, busy, clearSession]);
 
-  const initials = getInitials(session?.email ?? session?.orgId ?? "MyShop");
+  const initials = getInitials(session?.email ?? session?.orgId ?? APP_NAME);
 
   const isHrefActive = React.useCallback(
     (href: string) => {
@@ -99,7 +82,7 @@ export function AppDrawerContent(props: DrawerContentComponentProps) {
                 <Text style={styles.avatarText}>{initials}</Text>
               </View>
               <View style={styles.headerText}>
-                <Text style={styles.brand}>MyShop</Text>
+                <Text style={styles.brand}>{APP_NAME}</Text>
                 <Text style={styles.subtle} numberOfLines={1}>
                   {session?.email ?? "Offline mode"}
                 </Text>

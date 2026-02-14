@@ -2,6 +2,9 @@ import * as SecureStore from "expo-secure-store";
 import React from "react";
 import { Platform } from "react-native";
 
+import { bootstrapCatalogIfNeeded } from "@/catalog/bootstrapCatalog";
+import { SESSION_STORAGE_KEY } from "@/shared/constants";
+
 export type Session = {
   accessToken: string;
   orgId: string;
@@ -17,19 +20,17 @@ type SessionContextValue = {
 
 const SessionContext = React.createContext<SessionContextValue | undefined>(undefined);
 
-const STORAGE_KEY = "myshop.session.v1";
-
 async function readStoredSession(): Promise<Session | null> {
   const raw =
     Platform.OS === "web"
       ? (() => {
           try {
-            return globalThis.localStorage?.getItem(STORAGE_KEY) ?? null;
+            return globalThis.localStorage?.getItem(SESSION_STORAGE_KEY) ?? null;
           } catch {
             return null;
           }
         })()
-      : await SecureStore.getItemAsync(STORAGE_KEY);
+      : await SecureStore.getItemAsync(SESSION_STORAGE_KEY);
   if (!raw) return null;
   const parsed = JSON.parse(raw) as unknown;
   if (
@@ -47,20 +48,20 @@ async function writeStoredSession(next: Session | null): Promise<void> {
   if (!next) {
     if (Platform.OS === "web") {
       try {
-        globalThis.localStorage?.removeItem(STORAGE_KEY);
+        globalThis.localStorage?.removeItem(SESSION_STORAGE_KEY);
       } catch {}
       return;
     }
-    await SecureStore.deleteItemAsync(STORAGE_KEY);
+    await SecureStore.deleteItemAsync(SESSION_STORAGE_KEY);
     return;
   }
   if (Platform.OS === "web") {
     try {
-      globalThis.localStorage?.setItem(STORAGE_KEY, JSON.stringify(next));
+      globalThis.localStorage?.setItem(SESSION_STORAGE_KEY, JSON.stringify(next));
     } catch {}
     return;
   }
-  await SecureStore.setItemAsync(STORAGE_KEY, JSON.stringify(next));
+  await SecureStore.setItemAsync(SESSION_STORAGE_KEY, JSON.stringify(next));
 }
 
 export function SessionProvider(props: { children: React.ReactNode }) {
@@ -81,6 +82,12 @@ export function SessionProvider(props: { children: React.ReactNode }) {
       cancelled = true;
     };
   }, []);
+
+  React.useEffect(() => {
+    if (isHydrating) return;
+    if (!session) return;
+    void bootstrapCatalogIfNeeded(session);
+  }, [isHydrating, session]);
 
   const setSession = React.useCallback(async (next: Session) => {
     setSessionState(next);

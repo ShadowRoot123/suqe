@@ -222,6 +222,51 @@ RSpec.describe "OfflineSync", type: :request do
     )
   end
 
+  it "processes product_group and product_group_membership commands" do
+    org_body = create_org!
+    token = org_body.fetch("access_token")
+    org_id = org_body.dig("organization", "id")
+
+    product = Product.create!(org_id: org_id, name: "Cola")
+    group_id = SecureRandom.uuid
+    membership_id = SecureRandom.uuid
+
+    post "/api/v1/sync/push", params: {
+      device_id: "device-1",
+      commands: [
+        { idempotency_key: "pg-1", entity: "product_group", operation: "create", payload: { id: group_id, name: "Soft drinks" } }
+      ]
+    }, headers: auth_headers(token), as: :json
+    expect(response).to have_http_status(:ok)
+
+    OfflineSync::ProcessPending.call(org_id: org_id)
+    group = ProductGroup.find_by!(org_id: org_id, name: "Soft drinks")
+
+    post "/api/v1/sync/push", params: {
+      device_id: "device-1",
+      commands: [
+        {
+          idempotency_key: "pgm-1",
+          entity: "product_group_membership",
+          operation: "create",
+          payload: { id: membership_id, product_group_id: group.id, product_id: product.id }
+        }
+      ]
+    }, headers: auth_headers(token), as: :json
+    expect(response).to have_http_status(:ok)
+
+    OfflineSync::ProcessPending.call(org_id: org_id)
+    ProductGroupMembership.find_by!(org_id: org_id, product_group_id: group.id, product_id: product.id)
+
+    get "/api/v1/sync/pull", headers: auth_headers(token)
+    expect(response).to have_http_status(:ok)
+    body = JSON.parse(response.body)
+    expect(body.fetch("changes")).to include(
+      a_hash_including("action" => "sync.applied", "entity" => "product_group", "metadata" => a_hash_including("idempotency_key" => "pg-1")),
+      a_hash_including("action" => "sync.applied", "entity" => "product_group_membership", "metadata" => a_hash_including("idempotency_key" => "pgm-1"))
+    )
+  end
+
   it "filters changes by cursor" do
     org_body = create_org!
     token = org_body.fetch("access_token")

@@ -88,6 +88,26 @@ export async function variantsDelete(id: string) {
   await db.runAsync("DELETE FROM variants WHERE id = ?", [id]);
 }
 
+export async function variantsListByProduct(productId: string): Promise<VariantRow[]> {
+  if (Platform.OS === "web") {
+    return webRead()
+      .filter((v) => v.product_id === productId)
+      .slice()
+      .sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+  }
+  const db = await getDb();
+  return await db.getAllAsync<VariantRow>("SELECT * FROM variants WHERE product_id = ? ORDER BY updated_at DESC", [productId]);
+}
+
+export async function variantsGetById(id: string): Promise<VariantRow | null> {
+  if (Platform.OS === "web") {
+    return webRead().find((v) => v.id === id) ?? null;
+  }
+  const db = await getDb();
+  const row = await db.getFirstAsync<VariantRow>("SELECT * FROM variants WHERE id = ? LIMIT 1", [id]);
+  return row ?? null;
+}
+
 export async function variantsSearch(query: string, limit = 20): Promise<(VariantRow & { product_name: string | null })[]> {
   const q = query.trim();
   if (!q) return [];
@@ -121,4 +141,3 @@ export async function variantsSearch(query: string, limit = 20): Promise<(Varian
     [like, like, like, limit]
   );
 }
-

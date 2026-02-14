@@ -62,6 +62,14 @@ module OfflineSync
         return apply_variant(item)
       end
 
+      if item.entity == "product_group"
+        return apply_product_group(item)
+      end
+
+      if item.entity == "product_group_membership"
+        return apply_product_group_membership(item)
+      end
+
       { status: "applied", entity_id: nil, record: nil, error: nil }
     rescue StandardError => e
       { status: "failed", entity_id: nil, record: nil, error: e.message }
@@ -270,6 +278,123 @@ module OfflineSync
         variant&.destroy!
 
         return { status: "applied", entity_id: variant_id, record: { id: variant_id }, error: nil }
+      end
+
+      { status: "failed", entity_id: nil, record: nil, error: "Unsupported operation: #{item.operation}" }
+    rescue StandardError => e
+      { status: "failed", entity_id: fetch_key(payload, :id), record: payload, error: e.message }
+    end
+
+    def apply_product_group(item)
+      payload = normalize_hash(item.payload)
+      org_id = item.org_id
+
+      case item.operation
+      when "create"
+        name = fetch_key(payload, :name).to_s.strip
+        requested_id = fetch_key(payload, :id).presence
+        raise ArgumentError, "Missing field: name" if name.blank?
+
+        group =
+          begin
+            ProductGroup.create!(id: requested_id, org_id: org_id, name: name)
+          rescue ActiveRecord::RecordNotUnique
+            ProductGroup.find_by!(org_id: org_id, name: name)
+          end
+
+        return { status: "applied", entity_id: group.id, record: { id: group.id, name: group.name }, error: nil }
+      when "update"
+        group_id = fetch_key(payload, :id).presence
+        raise ArgumentError, "Missing field: id" if group_id.blank?
+
+        group = ProductGroup.find_by(org_id: org_id, id: group_id)
+        return { status: "applied", entity_id: group_id, record: { id: group_id }, error: nil } if group.blank?
+
+        updates = {}
+        updates[:name] = fetch_key(payload, :name).to_s.strip if payload.key?("name") || payload.key?(:name)
+        group.update!(updates) if updates.any?
+
+        return { status: "applied", entity_id: group.id, record: { id: group.id, name: group.name }, error: nil }
+      when "delete"
+        group_id = fetch_key(payload, :id).presence
+        raise ArgumentError, "Missing field: id" if group_id.blank?
+
+        group = ProductGroup.find_by(org_id: org_id, id: group_id)
+        group&.destroy!
+
+        return { status: "applied", entity_id: group_id, record: { id: group_id }, error: nil }
+      end
+
+      { status: "failed", entity_id: nil, record: nil, error: "Unsupported operation: #{item.operation}" }
+    rescue StandardError => e
+      { status: "failed", entity_id: fetch_key(payload, :id), record: payload, error: e.message }
+    end
+
+    def apply_product_group_membership(item)
+      payload = normalize_hash(item.payload)
+      org_id = item.org_id
+
+      case item.operation
+      when "create"
+        requested_id = fetch_key(payload, :id).presence
+        product_group_id = fetch_key(payload, :product_group_id).presence
+        product_id = fetch_key(payload, :product_id).presence
+        raise ArgumentError, "Missing field: product_group_id" if product_group_id.blank?
+        raise ArgumentError, "Missing field: product_id" if product_id.blank?
+
+        raise ArgumentError, "Invalid product_group" unless ProductGroup.where(org_id: org_id, id: product_group_id).exists?
+        raise ArgumentError, "Invalid product" unless Product.where(org_id: org_id, id: product_id).exists?
+
+        membership =
+          begin
+            ProductGroupMembership.create!(
+              id: requested_id,
+              org_id: org_id,
+              product_group_id: product_group_id,
+              product_id: product_id
+            )
+          rescue ActiveRecord::RecordNotUnique
+            ProductGroupMembership.find_by!(org_id: org_id, product_group_id: product_group_id, product_id: product_id)
+          end
+
+        return {
+          status: "applied",
+          entity_id: membership.id,
+          record: { id: membership.id, product_group_id: membership.product_group_id, product_id: membership.product_id },
+          error: nil
+        }
+      when "update"
+        membership_id = fetch_key(payload, :id).presence
+        raise ArgumentError, "Missing field: id" if membership_id.blank?
+
+        membership = ProductGroupMembership.find_by(org_id: org_id, id: membership_id)
+        return { status: "applied", entity_id: membership_id, record: { id: membership_id }, error: nil } if membership.blank?
+
+        updates = {}
+        updates[:product_group_id] = fetch_key(payload, :product_group_id) if payload.key?("product_group_id") || payload.key?(:product_group_id)
+        updates[:product_id] = fetch_key(payload, :product_id) if payload.key?("product_id") || payload.key?(:product_id)
+        if updates[:product_group_id].present? && !ProductGroup.where(org_id: org_id, id: updates[:product_group_id]).exists?
+          raise ArgumentError, "Invalid product_group"
+        end
+        if updates[:product_id].present? && !Product.where(org_id: org_id, id: updates[:product_id]).exists?
+          raise ArgumentError, "Invalid product"
+        end
+        membership.update!(updates) if updates.any?
+
+        return {
+          status: "applied",
+          entity_id: membership.id,
+          record: { id: membership.id, product_group_id: membership.product_group_id, product_id: membership.product_id },
+          error: nil
+        }
+      when "delete"
+        membership_id = fetch_key(payload, :id).presence
+        raise ArgumentError, "Missing field: id" if membership_id.blank?
+
+        membership = ProductGroupMembership.find_by(org_id: org_id, id: membership_id)
+        membership&.destroy!
+
+        return { status: "applied", entity_id: membership_id, record: { id: membership_id }, error: nil }
       end
 
       { status: "failed", entity_id: nil, record: nil, error: "Unsupported operation: #{item.operation}" }

@@ -57,6 +57,42 @@ export type SyncPullChange = {
 
 export type SyncPullResponse = { cursor: string | null; next_cursor: string; changes: SyncPullChange[]; acks: SyncPullAck[] };
 
+export type Category = {
+  id: string;
+  org_id: string;
+  parent_id: string | null;
+  name: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type Product = {
+  id: string;
+  org_id: string;
+  category_id: string | null;
+  name: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type Variant = {
+  id: string;
+  org_id: string;
+  product_id: string;
+  sku: string;
+  barcode: string | null;
+  attrs: Record<string, unknown>;
+  price: string;
+  cost_price: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CategoriesIndexResponse = { categories: Category[] };
+export type ProductsIndexResponse = { products: Product[] };
+export type VariantsIndexResponse = { variants: Variant[] };
+
 export function apiForSession(session: Session | null) {
   const client = createApiClient({ getAccessToken: () => session?.accessToken ?? null });
   return {
@@ -77,5 +113,8 @@ export function apiForSession(session: Session | null) {
         .request<SyncPullResponse>({ path: `/sync/pull?${params.toString()}` })
         .then((r) => r.data);
     },
+    categoriesIndex: () => client.request<CategoriesIndexResponse>({ path: "/categories" }).then((r) => r.data),
+    productsIndex: () => client.request<ProductsIndexResponse>({ path: "/products" }).then((r) => r.data),
+    variantsIndex: () => client.request<VariantsIndexResponse>({ path: "/variants" }).then((r) => r.data),
   };
 }
