@@ -1,5 +1,6 @@
 import { getApiBaseUrl } from "@/config/apiBaseUrl";
 import { ApiError, ApiErrorBody } from "@/api/errors";
+import { emitUnauthorized } from "@/auth/unauthorized";
 
 async function readTextSafe(res: Response): Promise<string> {
   try {
@@ -39,6 +40,8 @@ export function createApiClient(options: ApiClientOptions) {
 
     const res = await fetch(url, { method: args.method ?? "GET", headers, body });
     const requestId = res.headers.get("x-request-id") ?? undefined;
+
+    if (res.status === 401) emitUnauthorized();
 
     if (res.status === 204) return { data: undefined as T, requestId };
 

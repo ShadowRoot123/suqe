@@ -81,7 +81,6 @@ export function useTableState<T>(rows: T[], opts?: {
       sortDir: "asc",
       page: 1,
       pageSize: 25,
-      filters: {},
       ...opts?.initial,
       filters: { ...(opts?.initial?.filters ?? {}) },
     };

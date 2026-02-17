@@ -6,11 +6,14 @@ import { apiForSession } from "@/api/endpoints";
 import { ApiError } from "@/api/errors";
 import { useSession } from "@/auth/session";
 import { bootstrapCatalogIfNeeded } from "@/catalog/bootstrapCatalog";
+import { useToast } from "@/ui/toast";
+import { toErrorMessage } from "@/util/errorMessage";
 
 type OrganizationChoice = { id: string; name: string };
 
 export default function Login() {
   const { setSession } = useSession();
+  const toast = useToast();
   const [isSubmitting, setIsSubmitting] = React.useState(false);
 
   const [email, setEmail] = React.useState("");
@@ -48,15 +51,15 @@ export default function Login() {
           setOrgChoices(raw as OrganizationChoice[]);
           Alert.alert("Select organization", "Choose which organization you want to sign in to.");
         } else {
-          Alert.alert("Login failed", "Multiple organizations found for this email. Please contact support.");
+          toast.error("Multiple organizations found for this email. Please contact support.", { title: "Login failed" });
         }
       } else {
-        Alert.alert("Login failed", e instanceof Error ? e.message : "Unknown error");
+        toast.error(toErrorMessage(e), { title: "Login failed" });
       }
     } finally {
       setIsSubmitting(false);
     }
-  }, [isSubmitting, selectedOrgId, email, password, setSession]);
+  }, [isSubmitting, selectedOrgId, email, password, setSession, toast]);
 
   return (
     <SafeAreaView style={{ flex: 1, padding: 16, gap: 12 }}>

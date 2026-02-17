@@ -14,6 +14,8 @@ Rails.application.routes.draw do
       post "auth/login", to: "auth#login"
       post "auth/logout", to: "auth#logout"
 
+      get "me", to: "me#show"
+
       post "users/invite", to: "users#invite"
       post "users/accept_invite", to: "users#accept_invite"
 

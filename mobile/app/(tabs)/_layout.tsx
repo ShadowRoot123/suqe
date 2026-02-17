@@ -1,14 +1,20 @@
 import { Ionicons } from "@expo/vector-icons";
+import { Redirect } from "expo-router";
 import { Drawer } from "expo-router/drawer";
 import React from "react";
 import { useWindowDimensions } from "react-native";
 
+import { useSession } from "@/auth/session";
 import { AppDrawerContent } from "@/navigation/AppDrawerContent";
 import { theme } from "@/ui/theme";
 
 export default function TabsLayout() {
+  const { session, isHydrating } = useSession();
   const { width } = useWindowDimensions();
   const isLarge = width >= theme.breakpoints.drawerPermanentMinWidth;
+
+  if (isHydrating) return null;
+  if (!session) return <Redirect href="/(auth)/welcome" />;
 
   return (
     <Drawer

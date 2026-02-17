@@ -5,6 +5,7 @@ import { Provider } from "react-redux";
 import { SessionProvider } from "@/auth/session";
 import { migrate } from "@/db/db";
 import { store } from "@/store";
+import { ToastProvider } from "@/ui/toast";
 
 export function AppProviders(props: { children: React.ReactNode }) {
   const [ready, setReady] = React.useState(false);
@@ -44,7 +45,9 @@ export function AppProviders(props: { children: React.ReactNode }) {
 
   return (
     <Provider store={store}>
-      <SessionProvider>{props.children}</SessionProvider>
+      <ToastProvider>
+        <SessionProvider>{props.children}</SessionProvider>
+      </ToastProvider>
     </Provider>
   );
 }

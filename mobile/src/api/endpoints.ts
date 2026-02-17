@@ -1,7 +1,20 @@
 import { createApiClient } from "@/api/client";
-import { Session } from "@/auth/session";
+import type { Session } from "@/auth/session";
 
 export type HealthResponse = { ok: true };
+
+export type MeResponse = {
+  user: {
+    id: string;
+    org_id: string;
+    name: string;
+    email: string;
+    status: string;
+  };
+  role_ids: string[];
+  role_names: string[];
+  permissions: string[];
+};
 
 export type Organization = {
   id: string;
@@ -97,6 +110,7 @@ export function apiForSession(session: Session | null) {
   const client = createApiClient({ getAccessToken: () => session?.accessToken ?? null });
   return {
     health: () => client.request<HealthResponse>({ path: "/health" }).then((r) => r.data),
+    me: () => client.request<MeResponse>({ path: "/me" }).then((r) => r.data),
     createOrg: (body: CreateOrgRequest) =>
       client.request<CreateOrgResponse>({ path: "/orgs", method: "POST", body }).then((r) => r.data),
     login: (body: LoginRequest) =>

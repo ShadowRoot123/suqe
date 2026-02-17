@@ -2,6 +2,7 @@ import { router, useLocalSearchParams } from "expo-router";
 import React from "react";
 import { View } from "react-native";
 
+import { RequirePermissions } from "@/auth/RequirePermissions";
 import { categoriesList } from "@/catalog/categories";
 import { variantsSearch } from "@/catalog/variants";
 import { getLastSyncChanges } from "@/sync/syncEngine";
@@ -112,9 +113,10 @@ export default function CatalogScreen() {
   const variantRows = showPaged ? variantsTable.pagedRows : variantsTable.rows;
 
   return (
-    <Screen scroll>
-      <Stack gap={16}>
-        <AppText variant="h1">Catalog</AppText>
+    <RequirePermissions permissions={["catalog.read"]}>
+      <Screen scroll>
+        <Stack gap={16}>
+          <AppText variant="h1">Catalog</AppText>
 
         <Card>
           <Stack gap={12}>
@@ -314,7 +316,8 @@ export default function CatalogScreen() {
             />
           </Stack>
         </Card>
-      </Stack>
-    </Screen>
+        </Stack>
+      </Screen>
+    </RequirePermissions>
   );
 }

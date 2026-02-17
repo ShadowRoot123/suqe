@@ -1,12 +1,15 @@
 import React from "react";
-import { Alert, Pressable, SafeAreaView, Text, View } from "react-native";
+import { Pressable, SafeAreaView, Text, View } from "react-native";
 
 import { apiForSession } from "@/api/endpoints";
 import { useSession } from "@/auth/session";
 import { getApiBaseUrl } from "@/config/apiBaseUrl";
+import { useToast } from "@/ui/toast";
+import { toErrorMessage } from "@/util/errorMessage";
 
 export default function SettingsScreen() {
   const { session, clearSession } = useSession();
+  const toast = useToast();
   const [busy, setBusy] = React.useState(false);
 
   const logout = React.useCallback(async () => {
@@ -28,11 +31,11 @@ export default function SettingsScreen() {
     try {
       const api = apiForSession(null);
       await api.health();
-      Alert.alert("Health", "OK");
+      toast.success("OK", { title: "Health" });
     } catch (e) {
-      Alert.alert("Health", e instanceof Error ? e.message : "FAIL");
+      toast.error(toErrorMessage(e), { title: "Health" });
     }
-  }, []);
+  }, [toast]);
 
   return (
     <SafeAreaView style={{ flex: 1, padding: 16, gap: 12 }}>
@@ -70,4 +73,3 @@ export default function SettingsScreen() {
     </SafeAreaView>
   );
 }
-

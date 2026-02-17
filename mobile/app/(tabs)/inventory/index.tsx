@@ -1,10 +1,13 @@
 import React from "react";
-import { Alert, Pressable, SafeAreaView, Text, View } from "react-native";
+import { Pressable, SafeAreaView, Text, View } from "react-native";
 
+import { RequirePermissions } from "@/auth/RequirePermissions";
 import { makeIdempotencyKey } from "@/sync/idempotency";
 import { outboxCount, outboxEnqueue } from "@/sync/outbox";
+import { useToast } from "@/ui/toast";
 
 export default function InventoryScreen() {
+  const toast = useToast();
   const [pending, setPending] = React.useState(0);
 
   const refresh = React.useCallback(async () => {
@@ -23,28 +26,29 @@ export default function InventoryScreen() {
       payload: { kind: "adjustment", occurred_at: new Date().toISOString(), note: "Mobile adjustment (offline)" },
     });
     await refresh();
-    Alert.alert("Queued", "Inventory adjustment command added to outbox.");
-  }, [refresh]);
+    toast.success("Inventory adjustment command added to outbox.", { title: "Queued" });
+  }, [refresh, toast]);
 
   return (
-    <SafeAreaView style={{ flex: 1, padding: 16, gap: 12 }}>
-      <Text style={{ fontSize: 18, fontWeight: "700" }}>Inventory</Text>
+    <RequirePermissions permissions={["inventory.read"]}>
+      <SafeAreaView style={{ flex: 1, padding: 16, gap: 12 }}>
+        <Text style={{ fontSize: 18, fontWeight: "700" }}>Inventory</Text>
 
-      <View style={{ gap: 6 }}>
-        <Text style={{ color: "#444" }}>Pending outbox: {pending}</Text>
-      </View>
+        <View style={{ gap: 6 }}>
+          <Text style={{ color: "#444" }}>Pending outbox: {pending}</Text>
+        </View>
 
-      <Pressable
-        onPress={queueAdjustment}
-        style={{ padding: 14, backgroundColor: "#111", borderRadius: 10, alignItems: "center" }}
-      >
-        <Text style={{ color: "white", fontWeight: "600" }}>Queue adjustment (offline)</Text>
-      </Pressable>
+        <Pressable
+          onPress={queueAdjustment}
+          style={{ padding: 14, backgroundColor: "#111", borderRadius: 10, alignItems: "center" }}
+        >
+          <Text style={{ color: "white", fontWeight: "600" }}>Queue adjustment (offline)</Text>
+        </Pressable>
 
-      <View style={{ gap: 6, marginTop: 8 }}>
-        <Text style={{ color: "#444" }}>Inventory module is scaffolded for offline-first flow.</Text>
-      </View>
-    </SafeAreaView>
+        <View style={{ gap: 6, marginTop: 8 }}>
+          <Text style={{ color: "#444" }}>Inventory module is scaffolded for offline-first flow.</Text>
+        </View>
+      </SafeAreaView>
+    </RequirePermissions>
   );
 }
-

@@ -1,4 +1,5 @@
-import { apiForSession, type Session } from "@/api/endpoints";
+import { apiForSession } from "@/api/endpoints";
+import type { Session } from "@/auth/session";
 import { categoriesUpsert } from "@/catalog/categories";
 import { productsUpsert } from "@/catalog/products";
 import { variantsUpsert } from "@/catalog/variants";
@@ -42,4 +43,3 @@ export async function bootstrapCatalogIfNeeded(session: Session) {
 
   await kvSet(bootKey(session.orgId), new Date().toISOString());
 }
-

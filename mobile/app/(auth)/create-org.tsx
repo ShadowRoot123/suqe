@@ -4,9 +4,12 @@ import { Alert, Pressable, SafeAreaView, Text, TextInput, View } from "react-nat
 
 import { apiForSession } from "@/api/endpoints";
 import { useSession } from "@/auth/session";
+import { useToast } from "@/ui/toast";
+import { toErrorMessage } from "@/util/errorMessage";
 
 export default function CreateOrg() {
   const { setSession } = useSession();
+  const toast = useToast();
   const [isSubmitting, setIsSubmitting] = React.useState(false);
 
   const [orgName, setOrgName] = React.useState("");
@@ -32,11 +35,11 @@ export default function CreateOrg() {
       await setSession({ accessToken: res.access_token, orgId: res.organization.id, email: res.user.email });
       router.replace("/(tabs)/dashboard");
     } catch (e) {
-      Alert.alert("Create org failed", e instanceof Error ? e.message : "Unknown error");
+      toast.error(toErrorMessage(e), { title: "Create org failed" });
     } finally {
       setIsSubmitting(false);
     }
-  }, [isSubmitting, orgName, ownerName, ownerEmail, ownerPassword, setSession]);
+  }, [isSubmitting, orgName, ownerName, ownerEmail, ownerPassword, setSession, toast]);
 
   return (
     <SafeAreaView style={{ flex: 1, padding: 16, gap: 12 }}>

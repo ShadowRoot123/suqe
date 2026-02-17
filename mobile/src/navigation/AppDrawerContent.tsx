@@ -7,7 +7,7 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import { apiForSession } from "@/api/endpoints";
 import { useSession } from "@/auth/session";
 import { useSyncBadges } from "@/features/sync";
-import { navGroups } from "@/navigation/navGroups";
+import { getNavGroups, type NavItem } from "@/navigation/navGroups";
 import { APP_NAME } from "@/shared/constants";
 import { getInitials } from "@/shared/utils";
 import { theme } from "@/ui/theme";
@@ -18,6 +18,7 @@ export function AppDrawerContent(props: DrawerContentComponentProps) {
   const { pendingCount, changesCount, refresh } = useSyncBadges();
   const pathname = usePathname();
   const [expanded, setExpanded] = React.useState<Record<string, boolean>>({});
+  const navGroups = React.useMemo(() => getNavGroups({ permissions: session?.permissions }), [session?.permissions]);
 
   React.useEffect(() => {
     refresh().catch(() => {});
@@ -49,7 +50,7 @@ export function AppDrawerContent(props: DrawerContentComponentProps) {
   );
 
   const isItemActive = React.useCallback(
-    (item: (typeof navGroups)[number]["items"][number]) => {
+    (item: NavItem) => {
       if (item.href && isHrefActive(item.href)) return true;
       if (item.items && item.items.some((child) => child.href && isHrefActive(child.href))) return true;
       return false;
