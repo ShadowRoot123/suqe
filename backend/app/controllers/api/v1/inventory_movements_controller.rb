@@ -35,32 +35,19 @@ module Api
         return render_error(code: "invalid_variant", message: "Invalid variant", status: :unprocessable_entity) unless Variant.where(org_id: current_organization.id, id: variant_id).exists?
         return render_error(code: "invalid_location", message: "Invalid location", status: :unprocessable_entity) unless Location.where(org_id: current_organization.id, id: location_id).exists?
 
-        movement = nil
-        InventoryMovement.transaction do
-          movement = InventoryMovement.create!(
-            org_id: current_organization.id,
-            variant_id: variant_id,
-            location_id: location_id,
-            type: "adjustment",
-            quantity_delta: attributes.fetch(:quantity_delta),
-            note: attributes[:note],
-            created_by: current_user.id,
-            idempotency_key: attributes[:idempotency_key]
-          )
-
-          connection = ActiveRecord::Base.connection
-          connection.execute <<~SQL
-            INSERT INTO inventory_snapshots (id, org_id, variant_id, location_id, quantity, updated_at)
-            VALUES (gen_random_uuid(), #{connection.quote(current_organization.id)}, #{connection.quote(variant_id)}, #{connection.quote(location_id)}, #{connection.quote(attributes.fetch(:quantity_delta))}, now())
-            ON CONFLICT (org_id, variant_id, location_id)
-            DO UPDATE SET quantity = inventory_snapshots.quantity + EXCLUDED.quantity,
-                         updated_at = now();
-          SQL
-        end
+        movement = Inventory::RecordMovement.call(
+          org_id: current_organization.id,
+          variant_id: variant_id,
+          location_id: location_id,
+          quantity_delta: attributes.fetch(:quantity_delta),
+          note: attributes[:note],
+          created_by: current_user.id,
+          idempotency_key: attributes[:idempotency_key]
+        )
 
         render json: { inventory_movement: movement_payload(movement) }, status: :created
-      rescue ActiveRecord::RecordNotUnique
-        render_error(code: "not_unique", message: "Record already exists", status: :conflict)
+      rescue ArgumentError => e
+        render_error(code: "validation_error", message: e.message, status: :unprocessable_entity)
       end
 
       private

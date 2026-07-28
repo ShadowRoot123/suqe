@@ -99,6 +99,16 @@ export async function variantsListByProduct(productId: string): Promise<VariantR
   return await db.getAllAsync<VariantRow>("SELECT * FROM variants WHERE product_id = ? ORDER BY updated_at DESC", [productId]);
 }
 
+export async function variantsListAll(): Promise<VariantRow[]> {
+  if (Platform.OS === "web") {
+    return webRead()
+      .slice()
+      .sort((a, b) => a.sku.localeCompare(b.sku));
+  }
+  const db = await getDb();
+  return await db.getAllAsync<VariantRow>("SELECT * FROM variants ORDER BY sku ASC");
+}
+
 export async function variantsGetById(id: string): Promise<VariantRow | null> {
   if (Platform.OS === "web") {
     return webRead().find((v) => v.id === id) ?? null;

@@ -166,15 +166,16 @@ if seed_items_enabled && File.exist?(xlsx_path)
         variant.cost_price ||= 0
         variant.save!
 
-        snapshot = InventorySnapshot.find_or_initialize_by(
+        # Opening stock goes through the ledger, not straight into the snapshot cache —
+        # the idempotency key keeps re-seeding from stacking more stock on top.
+        Inventory::RecordMovement.call(
           org_id: org.id,
           variant_id: variant.id,
-          location_id: main_location.id
+          location_id: main_location.id,
+          quantity_delta: (Zlib.crc32(sku) % 50) + 1,
+          note: "Opening stock (seed)",
+          idempotency_key: "seed-opening-#{variant.id}"
         )
-        if snapshot.new_record?
-          snapshot.quantity = (Zlib.crc32(sku) % 50) + 1
-          snapshot.save!
-        end
       end
     end
   end

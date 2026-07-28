@@ -70,6 +70,10 @@ module OfflineSync
         return apply_product_group_membership(item)
       end
 
+      if item.entity == "inventory_adjustment"
+        return apply_inventory_adjustment(item)
+      end
+
       { status: "applied", entity_id: nil, record: nil, error: nil }
     rescue StandardError => e
       { status: "failed", entity_id: nil, record: nil, error: e.message }
@@ -414,6 +418,64 @@ module OfflineSync
       { status: "failed", entity_id: nil, record: nil, error: "Unsupported operation: #{item.operation}" }
     rescue StandardError => e
       { status: "failed", entity_id: fetch_key(payload, :id), record: payload, error: e.message }
+    end
+
+    # The ledger is append-only: an adjustment can only ever be created, and replaying the
+    # same command must not move stock twice (the outbox key is the movement's idempotency key).
+    def apply_inventory_adjustment(item)
+      payload = normalize_hash(item.payload)
+      org_id = item.org_id
+
+      unless item.operation == "create"
+        return {
+          status: "failed",
+          entity_id: fetch_key(payload, :id),
+          record: payload,
+          error: "Inventory movements are immutable: #{item.operation} is not supported"
+        }
+      end
+
+      variant_id = fetch_key(payload, :variant_id).presence
+      location_id = fetch_key(payload, :location_id).presence
+
+      movement = Inventory::RecordMovement.call(
+        org_id: org_id,
+        id: fetch_key(payload, :id).presence,
+        variant_id: variant_id,
+        location_id: location_id,
+        quantity_delta: fetch_key(payload, :quantity_delta),
+        note: fetch_key(payload, :note) || fetch_key(payload, :reason),
+        created_by: actor_id(org_id, fetch_key(payload, :created_by)),
+        idempotency_key: item.idempotency_key
+      )
+
+      {
+        status: "applied",
+        entity_id: movement.id,
+        record: {
+          id: movement.id,
+          variant_id: movement.variant_id,
+          location_id: movement.location_id,
+          type: movement.type,
+          quantity_delta: movement.quantity_delta.to_s,
+          note: movement.note,
+          created_by: movement.created_by,
+          created_at: movement.created_at.iso8601(6),
+          # so the pull feed can refresh on-hand without a second round trip
+          on_hand: Inventory::OnHand.for(org_id: org_id, variant_id: variant_id, location_id: location_id).to_s
+        },
+        error: nil
+      }
+    rescue StandardError => e
+      { status: "failed", entity_id: fetch_key(payload, :id), record: payload, error: e.message }
+    end
+
+    # Commands carry no session, so the client tells us who acted; ignore anyone outside the org.
+    def actor_id(org_id, user_id)
+      return nil if user_id.blank?
+      return nil unless Inventory::RecordMovement::UUID_FORMAT.match?(user_id.to_s)
+
+      User.where(org_id: org_id, id: user_id).exists? ? user_id : nil
     end
 
     def normalize_variant_options(value)

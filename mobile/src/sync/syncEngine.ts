@@ -6,6 +6,9 @@ import { productGroupsDelete, productGroupsGetById, productGroupsUpsert } from "
 import { productsDelete, productsUpsert } from "@/catalog/products";
 import { variantsDelete, variantsGetById, variantsUpsert } from "@/catalog/variants";
 import { kvGet, kvSet } from "@/db/kv";
+import { formatQuantity, parseQuantity } from "@/inventory/lib/quantity";
+import { movementsDelete, movementsUpsert } from "@/inventory/movements";
+import { snapshotsSet } from "@/inventory/snapshots";
 import { getDeviceId } from "@/sync/device";
 import { makeIdempotencyKey } from "@/sync/idempotency";
 import { outboxListPending, outboxMarkStatusByIdempotencyKey } from "@/sync/outbox";
@@ -337,13 +340,70 @@ export async function removeProductFromGroupOffline(membershipId: string) {
   });
 }
 
+/**
+ * Records a stock adjustment locally and queues it. The movement stays `synced: 0` until the
+ * server acknowledges it, so on-hand includes it immediately without double counting once the
+ * server's own on-hand comes back through the pull feed.
+ */
+export async function createInventoryAdjustmentOffline(args: {
+  variant_id: string;
+  location_id: string;
+  quantity_delta: number | string;
+  reason?: string | null;
+  created_by?: string | null;
+}) {
+  const delta = parseQuantity(args.quantity_delta);
+  if (delta === null) throw new Error("Quantity must be a number");
+  if (delta === 0) throw new Error("Quantity must not be zero");
+
+  const id = makeUuid();
+  const now = new Date().toISOString();
+  const quantity_delta = formatQuantity(delta);
+  const reason = args.reason?.trim() ? args.reason.trim() : null;
+
+  await movementsUpsert({
+    id,
+    variant_id: args.variant_id,
+    location_id: args.location_id,
+    type: "adjustment",
+    quantity_delta,
+    note: reason,
+    created_at: now,
+    synced: false,
+  });
+
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("adj"),
+    entity: "inventory_adjustment",
+    operation: "create",
+    payload: {
+      id,
+      variant_id: args.variant_id,
+      location_id: args.location_id,
+      quantity_delta,
+      reason,
+      created_by: args.created_by ?? null,
+    },
+  });
+
+  return id;
+}
+
 async function applyChanges(changes: SyncPullChange[]) {
   for (const change of changes) {
-    if (change.action !== "sync.applied") continue;
     const operation = String((change.metadata as any)?.operation ?? "");
     const record = (change.metadata as any)?.record;
     const id = String(change.entity_id ?? record?.id ?? "");
     if (!id) continue;
+
+    if (change.action !== "sync.applied") {
+      // A rejected adjustment never moved stock on the server, so drop the optimistic row
+      // instead of leaving it pending forever and inflating on-hand.
+      if (change.entity === "inventory_adjustment" && operation === "create") {
+        await movementsDelete(id);
+      }
+      continue;
+    }
 
     if (change.entity === "category") {
       if (operation === "delete") {
@@ -421,6 +481,31 @@ async function applyChanges(changes: SyncPullChange[]) {
       const product_id = String(record?.product_id ?? "");
       if (!product_group_id || !product_id) continue;
       await productGroupMembershipsUpsert({ id, product_group_id, product_id, updated_at: change.created_at });
+      continue;
+    }
+
+    if (change.entity === "inventory_adjustment") {
+      const variant_id = String(record?.variant_id ?? "");
+      const location_id = String(record?.location_id ?? "");
+      if (!variant_id || !location_id) continue;
+
+      // The ledger is append-only, so an applied adjustment only ever confirms a local row.
+      await movementsUpsert({
+        id,
+        variant_id,
+        location_id,
+        type: record?.type ? String(record.type) : "adjustment",
+        quantity_delta: record?.quantity_delta ?? "0",
+        note: record?.note ? String(record.note) : null,
+        created_at: record?.created_at ? String(record.created_at) : change.created_at,
+        synced: true,
+      });
+
+      // The server sends its own on-hand with the change so we don't have to ask for it.
+      const onHand = parseQuantity(record?.on_hand);
+      if (onHand !== null) {
+        await snapshotsSet({ variant_id, location_id, quantity: onHand, updated_at: change.created_at });
+      }
     }
   }
 }

@@ -40,5 +40,7 @@ end
 
 RSpec.configure do |config|
   config.include ApiRequestHelpers, type: :request
+  # domain specs only need skip_if_no_db!
+  config.include ApiRequestHelpers, type: :model
 end
 

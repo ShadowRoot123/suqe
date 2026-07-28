@@ -4,7 +4,7 @@ import { Platform } from "react-native";
 export type SqlDatabase = SQLiteDatabase;
 
 let dbPromise: Promise<SqlDatabase> | null = null;
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 export async function getDb(): Promise<SqlDatabase> {
   if (!dbPromise) dbPromise = openDatabaseAsync("myshop.db");
@@ -73,6 +73,25 @@ export async function migrate() {
       await db.execAsync("ALTER TABLE product_groups ADD COLUMN variant_options_json TEXT NOT NULL DEFAULT '{}'");
     } catch {}
     current = 5;
+    await db.execAsync(`PRAGMA user_version = ${current}`);
+  }
+
+  if (current < 6) {
+    await db.execAsync(
+      "CREATE TABLE IF NOT EXISTS locations (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, type TEXT NOT NULL, address TEXT, updated_at TEXT NOT NULL)"
+    );
+    await db.execAsync(
+      "CREATE TABLE IF NOT EXISTS inventory_movements (id TEXT PRIMARY KEY NOT NULL, variant_id TEXT NOT NULL, location_id TEXT NOT NULL, type TEXT NOT NULL, quantity_delta TEXT NOT NULL, note TEXT, created_at TEXT NOT NULL, synced INTEGER NOT NULL DEFAULT 0)"
+    );
+    await db.execAsync(
+      "CREATE TABLE IF NOT EXISTS inventory_snapshots (variant_id TEXT NOT NULL, location_id TEXT NOT NULL, quantity TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY (variant_id, location_id))"
+    );
+    await db.execAsync("CREATE INDEX IF NOT EXISTS idx_locations_name ON locations (name)");
+    await db.execAsync(
+      "CREATE INDEX IF NOT EXISTS idx_inv_movements_variant ON inventory_movements (variant_id, location_id, created_at DESC)"
+    );
+    await db.execAsync("CREATE INDEX IF NOT EXISTS idx_inv_movements_created ON inventory_movements (created_at DESC)");
+    current = 6;
     await db.execAsync(`PRAGMA user_version = ${current}`);
   }
 

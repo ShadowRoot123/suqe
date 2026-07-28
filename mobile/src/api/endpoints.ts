@@ -102,9 +102,29 @@ export type Variant = {
   updated_at: string;
 };
 
+export type Location = {
+  id: string;
+  org_id: string;
+  name: string;
+  type: string;
+  address: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type InventorySnapshot = {
+  org_id: string;
+  variant_id: string;
+  location_id: string;
+  quantity: string;
+  updated_at: string;
+};
+
 export type CategoriesIndexResponse = { categories: Category[] };
 export type ProductsIndexResponse = { products: Product[] };
 export type VariantsIndexResponse = { variants: Variant[] };
+export type LocationsIndexResponse = { locations: Location[] };
+export type InventorySnapshotsIndexResponse = { inventory_snapshots: InventorySnapshot[] };
 
 export function apiForSession(session: Session | null) {
   const client = createApiClient({ getAccessToken: () => session?.accessToken ?? null });
@@ -130,5 +150,8 @@ export function apiForSession(session: Session | null) {
     categoriesIndex: () => client.request<CategoriesIndexResponse>({ path: "/categories" }).then((r) => r.data),
     productsIndex: () => client.request<ProductsIndexResponse>({ path: "/products" }).then((r) => r.data),
     variantsIndex: () => client.request<VariantsIndexResponse>({ path: "/variants" }).then((r) => r.data),
+    locationsIndex: () => client.request<LocationsIndexResponse>({ path: "/locations" }).then((r) => r.data),
+    inventorySnapshotsIndex: () =>
+      client.request<InventorySnapshotsIndexResponse>({ path: "/inventory_snapshots" }).then((r) => r.data),
   };
 }
