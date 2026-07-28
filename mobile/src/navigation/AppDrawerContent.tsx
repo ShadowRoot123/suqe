@@ -122,7 +122,7 @@ export function AppDrawerContent(props: DrawerContentComponentProps) {
                       onPress={() => toggle(key)}
                       style={({ pressed }) => [
                         styles.row,
-                        active && styles.rowActive,
+                        active && styles.rowGroupActive,
                         pressed && styles.rowPressed,
                       ]}
                     >
@@ -131,17 +131,17 @@ export function AppDrawerContent(props: DrawerContentComponentProps) {
                           <Ionicons
                             name={item.icon}
                             size={20}
-                            color={active ? theme.colors.text : theme.colors.muted}
+                            color={active ? theme.colors.sidebarText : theme.colors.sidebarMuted}
                           />
                         ) : null}
-                        <Text style={[styles.rowTitle, active ? styles.rowTitleActive : styles.rowTitleInactive]}>
+                        <Text style={[styles.rowTitle, active ? styles.rowTitleGroupActive : styles.rowTitleInactive]}>
                           {item.title}
                         </Text>
                       </View>
                       <Ionicons
                         name={isOpen ? "chevron-up" : "chevron-down"}
                         size={18}
-                        color={theme.colors.muted}
+                        color={theme.colors.sidebarMuted}
                       />
                     </Pressable>
 
@@ -201,7 +201,7 @@ export function AppDrawerContent(props: DrawerContentComponentProps) {
                       <Ionicons
                         name={item.icon}
                         size={20}
-                        color={active ? theme.colors.text : theme.colors.muted}
+                        color={active ? theme.colors.sidebarText : theme.colors.sidebarMuted}
                       />
                     ) : null}
                     <Text style={[styles.rowTitle, active ? styles.rowTitleActive : styles.rowTitleInactive]}>
@@ -238,49 +238,51 @@ export function AppDrawerContent(props: DrawerContentComponentProps) {
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.colors.bg },
+  root: { flex: 1, backgroundColor: theme.colors.sidebar },
   scrollContent: { paddingTop: 0, paddingBottom: theme.spacing.md },
 
-  headerWrap: { padding: theme.spacing.md },
+  headerWrap: { padding: theme.spacing.sm },
   headerCard: {
-    backgroundColor: theme.colors.card,
+    backgroundColor: theme.colors.sidebarSurface,
     borderRadius: theme.radii.lg,
+    borderWidth: 1,
+    borderColor: theme.colors.sidebarBorder,
     padding: theme.spacing.sm,
   },
   headerRow: { flexDirection: "row", alignItems: "center", gap: theme.spacing.sm },
   avatar: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: "rgba(255,255,255,0.12)",
+    width: 40,
+    height: 40,
+    borderRadius: theme.radii.md,
+    backgroundColor: theme.colors.primary,
     alignItems: "center",
     justifyContent: "center",
   },
-  avatarText: { color: "white", fontWeight: "800" },
+  avatarText: { color: theme.colors.primaryText, fontWeight: "800" },
   headerText: { flex: 1, minWidth: 0 },
-  brand: { color: "white", fontSize: 16, fontWeight: "800" },
-  subtle: { color: theme.colors.cardMuted, marginTop: 2 },
+  brand: { color: theme.colors.sidebarText, fontSize: 16, fontWeight: "800" },
+  subtle: { color: theme.colors.sidebarMuted, marginTop: 2, fontSize: 13 },
 
-  metaRow: { marginTop: theme.spacing.sm, flexDirection: "row", alignItems: "center", gap: theme.spacing.sm },
-  metaText: { flex: 1, color: theme.colors.cardMuted },
-  metaRight: { flexDirection: "row", gap: theme.spacing.xs },
+  metaRow: { marginTop: theme.spacing.sm, flexDirection: "row", alignItems: "center", gap: theme.spacing.xs },
+  metaText: { flex: 1, color: theme.colors.sidebarMuted, fontSize: 11 },
+  metaRight: { flexDirection: "row", gap: 6 },
   metaPill: {
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 999,
-    backgroundColor: "rgba(255,255,255,0.12)",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: theme.radii.pill,
+    backgroundColor: "rgba(255,255,255,0.10)",
   },
-  metaPillText: { color: "white", fontWeight: "700", fontSize: 12 },
+  metaPillText: { color: theme.colors.sidebarText, fontWeight: "700", fontSize: 11 },
 
   section: { paddingHorizontal: theme.spacing.xs, marginTop: 2 },
   sectionTitle: {
-    marginTop: theme.spacing.xs,
-    marginBottom: theme.spacing.xs,
+    marginTop: theme.spacing.sm,
+    marginBottom: 6,
     paddingHorizontal: theme.spacing.sm,
-    color: theme.colors.muted,
+    color: theme.colors.sidebarMuted,
     fontWeight: "800",
-    fontSize: 12,
-    letterSpacing: 0.5,
+    fontSize: 11,
+    letterSpacing: 0.8,
     textTransform: "uppercase",
   },
   groupBlock: { marginBottom: 2 },
@@ -294,12 +296,14 @@ const styles = StyleSheet.create({
     marginHorizontal: theme.spacing.xs,
   },
   rowLeft: { flexDirection: "row", alignItems: "center", gap: theme.spacing.sm, flex: 1, minWidth: 0 },
-  rowPressed: { opacity: 0.85 },
-  rowActive: { backgroundColor: theme.colors.activeBg },
-  rowTitle: { fontWeight: "800", flex: 1 },
-  rowTitleActive: { color: theme.colors.text },
-  rowTitleInactive: { color: theme.colors.muted },
-  children: { paddingLeft: 42, paddingRight: theme.spacing.xs, marginTop: 6, gap: 6 },
+  rowPressed: { opacity: 0.7 },
+  rowActive: { backgroundColor: theme.colors.primary },
+  rowGroupActive: { backgroundColor: theme.colors.sidebarActiveBg },
+  rowTitle: { fontWeight: "700", flex: 1, fontSize: 14 },
+  rowTitleActive: { color: theme.colors.primaryText },
+  rowTitleGroupActive: { color: theme.colors.sidebarText },
+  rowTitleInactive: { color: theme.colors.sidebarMuted },
+  children: { paddingLeft: 42, paddingRight: theme.spacing.xs, marginTop: 4, gap: 2 },
   childRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -308,34 +312,36 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     paddingHorizontal: theme.spacing.sm,
   },
-  childRowActive: { backgroundColor: theme.colors.activeBg },
-  childTitle: { fontWeight: "800", flex: 1, marginRight: theme.spacing.xs },
+  childRowActive: { backgroundColor: theme.colors.primary },
+  childTitle: { fontWeight: "600", flex: 1, marginRight: theme.spacing.xs, fontSize: 14 },
   badge: {
-    minWidth: 24,
-    paddingHorizontal: 8,
+    minWidth: 22,
+    paddingHorizontal: 7,
     height: 20,
-    borderRadius: 10,
+    borderRadius: theme.radii.pill,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: theme.colors.badgeBg,
+    backgroundColor: "rgba(255,255,255,0.16)",
   },
-  badgeText: { color: theme.colors.badgeText, fontWeight: "800", fontSize: 12 },
+  badgeText: { color: theme.colors.sidebarText, fontWeight: "800", fontSize: 11 },
 
   footer: {
     borderTopWidth: 1,
-    borderTopColor: theme.colors.border,
-    padding: theme.spacing.md,
-    gap: 10,
+    borderTopColor: theme.colors.sidebarBorder,
+    padding: theme.spacing.sm,
+    gap: theme.spacing.xs,
   },
   logoutButton: {
     paddingVertical: theme.spacing.sm,
     paddingHorizontal: theme.spacing.sm,
     borderRadius: theme.radii.md,
-    backgroundColor: theme.colors.card,
+    backgroundColor: "rgba(255,255,255,0.08)",
+    borderWidth: 1,
+    borderColor: theme.colors.sidebarBorder,
     alignItems: "center",
   },
-  logoutButtonDisabled: { backgroundColor: "#dddddd" },
-  logoutText: { color: "white", fontWeight: "800" },
-  logoutTextDisabled: { color: theme.colors.muted },
-  footerNote: { color: theme.colors.muted, textAlign: "center", fontSize: 12 },
+  logoutButtonDisabled: { opacity: 0.5 },
+  logoutText: { color: theme.colors.sidebarText, fontWeight: "700" },
+  logoutTextDisabled: { color: theme.colors.sidebarMuted },
+  footerNote: { color: theme.colors.sidebarMuted, textAlign: "center", fontSize: 11 },
 });

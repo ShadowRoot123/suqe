@@ -9,19 +9,23 @@ export function LineChartCard({
   subtitle,
   right,
   data,
+  color,
+  emptyText,
 }: {
   title: string;
   subtitle?: string;
   right?: React.ReactNode;
   data: LineChartPoint[];
+  color?: string;
+  emptyText?: string;
 }) {
   const bp = useBreakpoint();
-  const height = bp.isMobile ? 220 : bp.isTablet ? 260 : 300;
+  const height = bp.isMobile ? 200 : bp.isTablet ? 240 : 260;
+  const isEmpty = data.length === 0 || data.every((p) => !p.y);
 
   return (
-    <ChartCard title={title} subtitle={subtitle} right={right}>
-      <LineChart data={data} height={height} />
+    <ChartCard title={title} subtitle={subtitle} right={right} isEmpty={isEmpty} emptyText={emptyText}>
+      <LineChart data={data} height={height} stroke={color} />
     </ChartCard>
   );
 }
-

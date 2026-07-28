@@ -1,13 +1,16 @@
 import React from "react";
-import { Platform, RefreshControl, View } from "react-native";
+import { RefreshControl, View } from "react-native";
 
 import { categoriesList } from "@/catalog/categories";
+import { productsList } from "@/catalog/products";
 import { getDb } from "@/db/db";
 import { getLastSyncChanges } from "@/sync/syncEngine";
 import { outboxCount } from "@/sync/outbox";
 import { BarChartCard, LineChartCard } from "@/ui/charts";
-import { AppText, KpiCard, Screen, Stack } from "@/ui/components";
+import { AppText, Badge, Card, KpiCard, Screen, Stack } from "@/ui/components";
 import { useBreakpoint } from "@/ui/hooks/useBreakpoint";
+import { theme } from "@/ui/theme";
+import { Platform } from "react-native";
 
 function startOfDayISO(d: Date) {
   const x = new Date(d);
@@ -43,25 +46,28 @@ export default function DashboardScreen() {
   const bp = useBreakpoint();
   const [refreshing, setRefreshing] = React.useState(false);
   const [pendingOutbox, setPendingOutbox] = React.useState(0);
-  const [categoryCount, setCategoryCount] = React.useState(0);
-  const [productCount, setProductCount] = React.useState(0);
+  const [categories, setCategories] = React.useState<{ id: string; name: string }[]>([]);
+  const [products, setProducts] = React.useState<{ category_id: string | null }[]>([]);
   const [variantCount, setVariantCount] = React.useState(0);
+  const [groupCount, setGroupCount] = React.useState(0);
   const [changes, setChanges] = React.useState<{ created_at: string; entity: string | null }[]>([]);
 
   const refresh = React.useCallback(async () => {
     setRefreshing(true);
     try {
-      const [pending, cats, prods, vars, lastChanges] = await Promise.all([
+      const [pending, cats, prods, vars, groups, lastChanges] = await Promise.all([
         outboxCount("pending"),
         categoriesList(),
-        countTable("products", "myshop.products.v1"),
+        productsList(),
         countTable("variants", "myshop.variants.v1"),
+        countTable("product_groups", "myshop.product_groups.v1"),
         getLastSyncChanges(),
       ]);
       setPendingOutbox(pending);
-      setCategoryCount(cats.length);
-      setProductCount(prods);
+      setCategories(cats.map((c) => ({ id: c.id, name: c.name })));
+      setProducts(prods.map((p) => ({ category_id: p.category_id })));
       setVariantCount(vars);
+      setGroupCount(groups);
       setChanges(lastChanges.map((c) => ({ created_at: c.created_at, entity: c.entity })));
     } finally {
       setRefreshing(false);
@@ -88,43 +94,111 @@ export default function DashboardScreen() {
   }
   const entityBars = [...byEntity.entries()]
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 8)
+    .slice(0, 6)
+    .map(([x, y]) => ({ x, y }));
+
+  const categoryName = new Map(categories.map((c) => [c.id, c.name]));
+  const byCategory = new Map<string, number>();
+  for (const p of products) {
+    const name = p.category_id ? categoryName.get(p.category_id) ?? "Unknown" : "Uncategorized";
+    byCategory.set(name, (byCategory.get(name) ?? 0) + 1);
+  }
+  const categoryBars = [...byCategory.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6)
     .map(([x, y]) => ({ x, y }));
 
   const kpiWidth = bp.isMobile ? "100%" : bp.isTablet ? "48%" : "24%";
   const chartWidth = bp.isMobile ? "100%" : bp.isTablet ? "100%" : "49%";
+  const synced = pendingOutbox === 0;
 
   return (
-    <Screen
-      scroll
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} />}
-    >
+    <Screen scroll refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} />}>
       <Stack gap={16}>
-        <AppText variant="h1">Dashboard</AppText>
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: theme.spacing.xs,
+          }}
+        >
+          <View style={{ flex: 1, minWidth: 200 }}>
+            <AppText variant="h1">Dashboard</AppText>
+            <AppText muted>Catalog stored on this device and its sync status</AppText>
+          </View>
+          <Badge
+            label={synced ? "All changes synced" : `${pendingOutbox} pending`}
+            tone={synced ? "success" : "warning"}
+          />
+        </View>
 
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 12 }}>
           <View style={{ width: kpiWidth }}>
-            <KpiCard label="Pending outbox" value={pendingOutbox} subtitle="Offline commands waiting to sync" />
+            <KpiCard
+              label="Products"
+              value={products.length}
+              subtitle="Cached locally"
+              tone="primary"
+              icon="pricetag-outline"
+            />
           </View>
           <View style={{ width: kpiWidth }}>
-            <KpiCard label="Categories" value={categoryCount} subtitle="Stored locally" />
+            <KpiCard label="Variants" value={variantCount} subtitle="Sellable units" icon="cube-outline" />
           </View>
           <View style={{ width: kpiWidth }}>
-            <KpiCard label="Products" value={productCount} subtitle="Stored locally" />
+            <KpiCard label="Categories" value={categories.length} subtitle={`${groupCount} product groups`} icon="folder-outline" />
           </View>
           <View style={{ width: kpiWidth }}>
-            <KpiCard label="Variants" value={variantCount} subtitle="Stored locally" />
+            <KpiCard
+              label="Pending sync"
+              value={pendingOutbox}
+              subtitle={synced ? "Nothing waiting to push" : "Offline commands queued"}
+              tone={synced ? "success" : "warning"}
+              icon={synced ? "checkmark-circle-outline" : "cloud-upload-outline"}
+            />
           </View>
         </View>
 
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 12 }}>
           <View style={{ width: chartWidth }}>
-            <LineChartCard title="Sync changes (7d)" subtitle="Count of recent pull changes" data={dailyCounts} />
+            <LineChartCard
+              title="Sync activity"
+              subtitle="Changes pulled per day, last 7 days"
+              data={dailyCounts}
+              emptyText="No changes pulled in the last 7 days"
+            />
           </View>
           <View style={{ width: chartWidth }}>
-            <BarChartCard title="Changes by entity" subtitle="Top entities (last 50)" data={entityBars} />
+            <BarChartCard
+              title="Products by category"
+              subtitle="Top 6 categories"
+              data={categoryBars}
+              color={theme.series[1]}
+              emptyText="No products cached yet"
+            />
           </View>
         </View>
+
+        <BarChartCard
+          title="Changes by entity"
+          subtitle="Most recent 50 pulled changes"
+          data={entityBars}
+          color={theme.series[4]}
+          emptyText="Run a sync to see recent changes"
+        />
+
+        {products.length === 0 ? (
+          <Card>
+            <Stack gap={6}>
+              <AppText variant="h3">No catalog yet</AppText>
+              <AppText muted>
+                Pull from the server on the Sync screen to download products, or create one from the Products screen.
+              </AppText>
+            </Stack>
+          </Card>
+        ) : null}
       </Stack>
     </Screen>
   );

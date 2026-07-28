@@ -9,19 +9,23 @@ export function BarChartCard({
   subtitle,
   right,
   data,
+  color,
+  emptyText,
 }: {
   title: string;
   subtitle?: string;
   right?: React.ReactNode;
   data: BarChartPoint[];
+  color?: string;
+  emptyText?: string;
 }) {
   const bp = useBreakpoint();
-  const height = bp.isMobile ? 220 : bp.isTablet ? 260 : 300;
+  const height = bp.isMobile ? 200 : bp.isTablet ? 240 : 260;
+  const isEmpty = data.length === 0;
 
   return (
-    <ChartCard title={title} subtitle={subtitle} right={right}>
-      <BarChart data={data} height={height} />
+    <ChartCard title={title} subtitle={subtitle} right={right} isEmpty={isEmpty} emptyText={emptyText}>
+      <BarChart data={data} height={height} color={color} />
     </ChartCard>
   );
 }
-

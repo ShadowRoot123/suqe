@@ -4,26 +4,29 @@ import { StyleSheet, View, type ViewProps } from "react-native";
 import { AppText } from "@/ui/components/AppText";
 import { theme } from "@/ui/theme";
 
-export type BadgeTone = "neutral" | "success" | "warning" | "danger";
+export type BadgeTone = "neutral" | "info" | "success" | "warning" | "danger";
 
 export type BadgeProps = ViewProps & {
   label: string;
   tone?: BadgeTone;
 };
 
+const TONE = {
+  neutral: { bg: theme.colors.surfaceAlt, border: theme.colors.border, text: theme.colors.textSecondary },
+  info: { bg: theme.colors.infoBg, border: theme.colors.infoBg, text: theme.colors.infoText },
+  success: { bg: theme.colors.successBg, border: theme.colors.successBg, text: theme.colors.successText },
+  warning: { bg: theme.colors.warningBg, border: theme.colors.warningBg, text: theme.colors.warningText },
+  danger: { bg: theme.colors.dangerBg, border: theme.colors.dangerBg, text: theme.colors.dangerText },
+} as const;
+
 export function Badge({ label, tone = "neutral", style, ...props }: BadgeProps) {
+  const palette = TONE[tone];
   return (
     <View
       {...props}
-      style={[
-        styles.base,
-        tone === "success" && styles.success,
-        tone === "warning" && styles.warning,
-        tone === "danger" && styles.danger,
-        style,
-      ]}
+      style={[styles.base, { backgroundColor: palette.bg, borderColor: palette.border }, style]}
     >
-      <AppText variant="caption" style={[styles.text, tone !== "neutral" && styles.textTone]}>
+      <AppText variant="caption" style={[styles.text, { color: palette.text }]}>
         {label}
       </AppText>
     </View>
@@ -31,11 +34,11 @@ export function Badge({ label, tone = "neutral", style, ...props }: BadgeProps) 
 }
 
 const styles = StyleSheet.create({
-  base: { backgroundColor: theme.colors.activeBg, borderRadius: 999, paddingHorizontal: 10, paddingVertical: 6 },
-  text: { color: theme.colors.text, fontWeight: theme.typography.weight.bold },
-  textTone: { color: theme.colors.text },
-  success: { backgroundColor: theme.colors.successBg },
-  warning: { backgroundColor: theme.colors.warningBg },
-  danger: { backgroundColor: theme.colors.dangerBg },
+  base: {
+    borderRadius: theme.radii.pill,
+    borderWidth: 1,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  text: { fontWeight: theme.typography.weight.semibold },
 });
-
