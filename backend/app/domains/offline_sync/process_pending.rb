@@ -293,16 +293,22 @@ module OfflineSync
       when "create"
         name = fetch_key(payload, :name).to_s.strip
         requested_id = fetch_key(payload, :id).presence
+        variant_options = normalize_variant_options(fetch_key(payload, :variant_options))
         raise ArgumentError, "Missing field: name" if name.blank?
 
         group =
           begin
-            ProductGroup.create!(id: requested_id, org_id: org_id, name: name)
+            ProductGroup.create!(id: requested_id, org_id: org_id, name: name, variant_options: variant_options)
           rescue ActiveRecord::RecordNotUnique
             ProductGroup.find_by!(org_id: org_id, name: name)
           end
 
-        return { status: "applied", entity_id: group.id, record: { id: group.id, name: group.name }, error: nil }
+        return {
+          status: "applied",
+          entity_id: group.id,
+          record: { id: group.id, name: group.name, variant_options: group.variant_options },
+          error: nil
+        }
       when "update"
         group_id = fetch_key(payload, :id).presence
         raise ArgumentError, "Missing field: id" if group_id.blank?
@@ -312,9 +318,17 @@ module OfflineSync
 
         updates = {}
         updates[:name] = fetch_key(payload, :name).to_s.strip if payload.key?("name") || payload.key?(:name)
+        if payload.key?("variant_options") || payload.key?(:variant_options)
+          updates[:variant_options] = normalize_variant_options(fetch_key(payload, :variant_options))
+        end
         group.update!(updates) if updates.any?
 
-        return { status: "applied", entity_id: group.id, record: { id: group.id, name: group.name }, error: nil }
+        return {
+          status: "applied",
+          entity_id: group.id,
+          record: { id: group.id, name: group.name, variant_options: group.variant_options },
+          error: nil
+        }
       when "delete"
         group_id = fetch_key(payload, :id).presence
         raise ArgumentError, "Missing field: id" if group_id.blank?
@@ -400,6 +414,20 @@ module OfflineSync
       { status: "failed", entity_id: nil, record: nil, error: "Unsupported operation: #{item.operation}" }
     rescue StandardError => e
       { status: "failed", entity_id: fetch_key(payload, :id), record: payload, error: e.message }
+    end
+
+    def normalize_variant_options(value)
+      raw = normalize_hash(value)
+      out = {}
+      raw.each do |k, v|
+        key = k.to_s.strip
+        next if key.blank?
+        arr = v.is_a?(Array) ? v : [v]
+        vals = arr.map { |x| x.to_s.strip }.reject(&:blank?)
+        next if vals.empty?
+        out[key] = vals
+      end
+      out
     end
 
     def write_audit_log(item, result)

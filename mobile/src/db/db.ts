@@ -4,7 +4,7 @@ import { Platform } from "react-native";
 export type SqlDatabase = SQLiteDatabase;
 
 let dbPromise: Promise<SqlDatabase> | null = null;
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 export async function getDb(): Promise<SqlDatabase> {
   if (!dbPromise) dbPromise = openDatabaseAsync("myshop.db");
@@ -53,7 +53,7 @@ export async function migrate() {
 
   if (current < 4) {
     await db.execAsync(
-      "CREATE TABLE IF NOT EXISTS product_groups (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, updated_at TEXT NOT NULL)"
+      "CREATE TABLE IF NOT EXISTS product_groups (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, variant_options_json TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL)"
     );
     await db.execAsync(
       "CREATE TABLE IF NOT EXISTS product_group_memberships (id TEXT PRIMARY KEY NOT NULL, product_group_id TEXT NOT NULL, product_id TEXT NOT NULL, updated_at TEXT NOT NULL)"
@@ -65,6 +65,14 @@ export async function migrate() {
     await db.execAsync("CREATE INDEX IF NOT EXISTS idx_pg_memberships_group ON product_group_memberships (product_group_id)");
     await db.execAsync("CREATE INDEX IF NOT EXISTS idx_pg_memberships_product ON product_group_memberships (product_id)");
     current = 4;
+    await db.execAsync(`PRAGMA user_version = ${current}`);
+  }
+
+  if (current < 5) {
+    try {
+      await db.execAsync("ALTER TABLE product_groups ADD COLUMN variant_options_json TEXT NOT NULL DEFAULT '{}'");
+    } catch {}
+    current = 5;
     await db.execAsync(`PRAGMA user_version = ${current}`);
   }
 

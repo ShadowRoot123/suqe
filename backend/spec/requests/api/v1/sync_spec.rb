@@ -267,6 +267,66 @@ RSpec.describe "OfflineSync", type: :request do
     )
   end
 
+  it "persists and normalizes variant_options on product_group create and update" do
+    org_body = create_org!
+    token = org_body.fetch("access_token")
+    org_id = org_body.dig("organization", "id")
+
+    group_id = SecureRandom.uuid
+
+    post "/api/v1/sync/push", params: {
+      device_id: "device-1",
+      commands: [
+        {
+          idempotency_key: "pg-vo-1",
+          entity: "product_group",
+          operation: "create",
+          payload: {
+            id: group_id,
+            name: "Shirts",
+            variant_options: { "Size" => ["S", " M ", ""], "  " => ["x"], "Color" => "Red" }
+          }
+        }
+      ]
+    }, headers: auth_headers(token), as: :json
+    expect(response).to have_http_status(:ok)
+
+    OfflineSync::ProcessPending.call(org_id: org_id)
+
+    group = ProductGroup.find_by!(org_id: org_id, id: group_id)
+    expect(group.variant_options).to eq("Size" => %w[S M], "Color" => %w[Red])
+
+    post "/api/v1/sync/push", params: {
+      device_id: "device-1",
+      commands: [
+        {
+          idempotency_key: "pg-vo-2",
+          entity: "product_group",
+          operation: "update",
+          payload: { id: group_id, variant_options: { "Material" => ["Cotton"] } }
+        }
+      ]
+    }, headers: auth_headers(token), as: :json
+    expect(response).to have_http_status(:ok)
+
+    OfflineSync::ProcessPending.call(org_id: org_id)
+    expect(group.reload.variant_options).to eq("Material" => %w[Cotton])
+
+    get "/api/v1/sync/pull", headers: auth_headers(token)
+    expect(response).to have_http_status(:ok)
+    body = JSON.parse(response.body)
+    expect(body.fetch("changes")).to include(
+      a_hash_including(
+        "action" => "sync.applied",
+        "entity" => "product_group",
+        "metadata" => a_hash_including(
+          "idempotency_key" => "pg-vo-2",
+          "record" => a_hash_including("variant_options" => { "Material" => %w[Cotton] })
+        )
+      )
+    )
+  end
+
   it "filters changes by cursor" do
     org_body = create_org!
     token = org_body.fetch("access_token")

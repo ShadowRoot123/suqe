@@ -3,14 +3,22 @@ import { Platform } from "react-native";
 
 const WEB_KEY = "myshop.product_groups.v1";
 
-export type ProductGroupRow = { id: string; name: string; updated_at: string };
+export type ProductGroupRow = { id: string; name: string; variant_options_json: string; updated_at: string };
 
 function webRead(): ProductGroupRow[] {
   try {
     const raw = globalThis.localStorage?.getItem(WEB_KEY);
     if (!raw) return [];
-    const parsed = JSON.parse(raw) as ProductGroupRow[];
-    return Array.isArray(parsed) ? parsed : [];
+    const parsed = JSON.parse(raw) as Array<Partial<ProductGroupRow>>;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((r) => typeof r?.id === "string" && typeof r?.name === "string" && typeof r?.updated_at === "string")
+      .map((r) => ({
+        id: String(r.id),
+        name: String(r.name),
+        variant_options_json: typeof r.variant_options_json === "string" ? r.variant_options_json : "{}",
+        updated_at: String(r.updated_at),
+      }));
   } catch {
     return [];
   }
@@ -22,9 +30,14 @@ function webWrite(rows: ProductGroupRow[]) {
   } catch {}
 }
 
-export async function productGroupsUpsert(row: { id: string; name: string; updated_at?: string }) {
+export async function productGroupsUpsert(row: { id: string; name: string; variant_options_json?: string; updated_at?: string }) {
   const now = row.updated_at ?? new Date().toISOString();
-  const normalized: ProductGroupRow = { id: row.id, name: row.name, updated_at: now };
+  const normalized: ProductGroupRow = {
+    id: row.id,
+    name: row.name,
+    variant_options_json: row.variant_options_json ?? "{}",
+    updated_at: now,
+  };
 
   if (Platform.OS === "web") {
     const rows = webRead();
@@ -37,8 +50,8 @@ export async function productGroupsUpsert(row: { id: string; name: string; updat
 
   const db = await getDb();
   await db.runAsync(
-    "INSERT INTO product_groups (id, name, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at",
-    [normalized.id, normalized.name, normalized.updated_at]
+    "INSERT INTO product_groups (id, name, variant_options_json, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET name = excluded.name, variant_options_json = excluded.variant_options_json, updated_at = excluded.updated_at",
+    [normalized.id, normalized.name, normalized.variant_options_json, normalized.updated_at]
   );
 }
 
@@ -77,4 +90,3 @@ export async function productGroupsGetById(id: string): Promise<ProductGroupRow 
   const row = await db.getFirstAsync<ProductGroupRow>("SELECT * FROM product_groups WHERE id = ? LIMIT 1", [id]);
   return row ?? null;
 }
-

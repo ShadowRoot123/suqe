@@ -2,7 +2,7 @@ import { apiForSession, SyncCommand, SyncPullChange } from "@/api/endpoints";
 import { Session } from "@/auth/session";
 import { categoriesDelete, categoriesUpsert } from "@/catalog/categories";
 import { productGroupMembershipsDelete, productGroupMembershipsUpsert } from "@/catalog/productGroupMemberships";
-import { productGroupsDelete, productGroupsUpsert } from "@/catalog/productGroups";
+import { productGroupsDelete, productGroupsGetById, productGroupsUpsert } from "@/catalog/productGroups";
 import { productsDelete, productsUpsert } from "@/catalog/products";
 import { variantsDelete, variantsGetById, variantsUpsert } from "@/catalog/variants";
 import { kvGet, kvSet } from "@/db/kv";
@@ -261,29 +261,46 @@ export async function deleteVariantOffline(id: string) {
   });
 }
 
-export async function createProductGroupOffline(name: string) {
+export async function createProductGroupOffline(name: string, variant_options: Record<string, string[]> = {}) {
   const id = makeUuid();
   const now = new Date().toISOString();
+  const variant_options_json = JSON.stringify(variant_options);
 
-  await productGroupsUpsert({ id, name, updated_at: now });
+  await productGroupsUpsert({ id, name, variant_options_json, updated_at: now });
   await outboxEnqueue({
     idempotencyKey: makeIdempotencyKey("pg"),
     entity: "product_group",
     operation: "create",
-    payload: { id, name },
+    payload: { id, name, variant_options },
   });
 
   return id;
 }
 
-export async function updateProductGroupOffline(args: { id: string; name: string }) {
+export async function updateProductGroupOffline(args: { id: string; name: string; variant_options?: Record<string, string[]> }) {
   const now = new Date().toISOString();
-  await productGroupsUpsert({ id: args.id, name: args.name, updated_at: now });
+  let nextVariantOptions = args.variant_options;
+  if (!nextVariantOptions) {
+    const existing = await productGroupsGetById(args.id);
+    if (existing?.variant_options_json) {
+      try {
+        const parsed = JSON.parse(existing.variant_options_json);
+        nextVariantOptions = typeof parsed === "object" && parsed ? (parsed as Record<string, string[]>) : {};
+      } catch {
+        nextVariantOptions = {};
+      }
+    } else {
+      nextVariantOptions = {};
+    }
+  }
+  const variant_options_json = JSON.stringify(nextVariantOptions);
+
+  await productGroupsUpsert({ id: args.id, name: args.name, variant_options_json, updated_at: now });
   await outboxEnqueue({
     idempotencyKey: makeIdempotencyKey("pg"),
     entity: "product_group",
     operation: "update",
-    payload: { id: args.id, name: args.name },
+    payload: { id: args.id, name: args.name, variant_options: nextVariantOptions },
   });
 }
 
@@ -383,7 +400,15 @@ async function applyChanges(changes: SyncPullChange[]) {
       }
       const name = String(record?.name ?? "");
       if (!name) continue;
-      await productGroupsUpsert({ id, name, updated_at: change.created_at });
+      let variant_options_json = "{}";
+      if (record && Object.prototype.hasOwnProperty.call(record, "variant_options")) {
+        const variant_options = (record as any).variant_options ?? {};
+        variant_options_json = JSON.stringify(variant_options);
+      } else {
+        const existing = await productGroupsGetById(id);
+        variant_options_json = existing?.variant_options_json ?? "{}";
+      }
+      await productGroupsUpsert({ id, name, variant_options_json, updated_at: change.created_at });
       continue;
     }
 
