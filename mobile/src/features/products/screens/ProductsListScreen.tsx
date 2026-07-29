@@ -53,9 +53,9 @@ export default function ProductsListScreen() {
               onPress={() => table.setFilter("status", table.state.filters.status === "active" ? null : "active")}
             />
             <Chip
-              label="Inactive"
-              selected={table.state.filters.status === "inactive"}
-              onPress={() => table.setFilter("status", table.state.filters.status === "inactive" ? null : "inactive")}
+              label="Archived"
+              selected={table.state.filters.status === "archived"}
+              onPress={() => table.setFilter("status", table.state.filters.status === "archived" ? null : "archived")}
             />
             {categories.slice(0, 8).map((c) => (
               <Chip

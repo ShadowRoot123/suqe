@@ -35,7 +35,7 @@ export default function ProductEditScreen() {
         return;
       }
       setName(product.name);
-      setStatus((product.status as ProductStatus) === "inactive" ? "inactive" : "active");
+      setStatus((product.status as ProductStatus) === "archived" ? "archived" : "active");
       setCategoryId(product.category_id ?? null);
       setLoading(false);
     })();
@@ -65,7 +65,7 @@ export default function ProductEditScreen() {
                   onChange={(v) => setStatus(v)}
                   options={[
                     { value: "active", label: "Active" },
-                    { value: "inactive", label: "Inactive" },
+                    { value: "archived", label: "Archived" },
                   ]}
                 />
                 <SelectField

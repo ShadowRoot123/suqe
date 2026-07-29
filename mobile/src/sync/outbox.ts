@@ -58,6 +58,37 @@ export async function outboxListPending(limit = 50): Promise<OutboxRow[]> {
   );
 }
 
+/**
+ * Ids of an entity that still have a command in flight (queued locally, or pushed but not yet
+ * acknowledged). A REST refresh must leave these rows alone: the server's copy is older than the
+ * local edit until the command lands, so overwriting it would silently undo the user's work.
+ */
+export async function outboxUnsettledEntityIds(entity: string): Promise<Set<string>> {
+  const ids = new Set<string>();
+
+  const collect = (rows: OutboxRow[]) => {
+    for (const row of rows) {
+      try {
+        const id = (JSON.parse(row.payload) as { id?: unknown })?.id;
+        if (typeof id === "string" && id) ids.add(id);
+      } catch {
+        // a payload we can't parse can't be matched to a row; nothing to protect
+      }
+    }
+  };
+
+  if (Platform.OS === "web") {
+    collect(webRead().filter((r) => r.entity === entity && (r.status === "pending" || r.status === "enqueued")));
+    return ids;
+  }
+
+  const db = await getDb();
+  collect(
+    await db.getAllAsync<OutboxRow>("SELECT * FROM outbox WHERE entity = ? AND status IN ('pending', 'enqueued')", [entity])
+  );
+  return ids;
+}
+
 export async function outboxEnqueue(args: { idempotencyKey: string; entity: string; operation: string; payload: unknown }) {
   if (Platform.OS === "web") {
     const rows = webRead();

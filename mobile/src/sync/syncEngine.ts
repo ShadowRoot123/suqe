@@ -7,6 +7,7 @@ import { productsDelete, productsUpsert } from "@/catalog/products";
 import { variantsDelete, variantsGetById, variantsUpsert } from "@/catalog/variants";
 import { kvGet, kvSet } from "@/db/kv";
 import { formatQuantity, parseQuantity } from "@/inventory/lib/quantity";
+import { locationsDelete, locationsGetById, locationsUpsert } from "@/inventory/locations";
 import { movementsDelete, movementsUpsert } from "@/inventory/movements";
 import { snapshotsSet } from "@/inventory/snapshots";
 import { getDeviceId } from "@/sync/device";
@@ -340,6 +341,67 @@ export async function removeProductFromGroupOffline(membershipId: string) {
   });
 }
 
+export type LocationType = "shop" | "warehouse";
+
+export async function createLocationOffline(args: { name: string; type?: LocationType; address?: string | null }) {
+  const id = makeUuid();
+  const now = new Date().toISOString();
+  const name = args.name.trim();
+  const type = args.type ?? "shop";
+  const address = args.address?.trim() ? args.address.trim() : null;
+  if (!name) throw new Error("Name is required");
+
+  await locationsUpsert({ id, name, type, address, updated_at: now });
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("loc"),
+    entity: "location",
+    operation: "create",
+    payload: { id, name, type, address },
+  });
+
+  return id;
+}
+
+export async function updateLocationOffline(args: {
+  id: string;
+  name: string;
+  type?: LocationType;
+  address?: string | null;
+}) {
+  const now = new Date().toISOString();
+  const name = args.name.trim();
+  if (!name) throw new Error("Name is required");
+
+  const existing = await locationsGetById(args.id);
+  if (!existing) throw new Error("Location not found");
+
+  const type = args.type ?? (existing.type as LocationType);
+  const address = args.address === undefined ? existing.address : args.address?.trim() ? args.address.trim() : null;
+
+  await locationsUpsert({ id: args.id, name, type, address, updated_at: now });
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("loc"),
+    entity: "location",
+    operation: "update",
+    payload: { id: args.id, name, type, address },
+  });
+}
+
+/**
+ * The server refuses to delete a location stock has moved through, and the client can't know the
+ * whole ledger, so the row goes optimistically. A refused delete leaves the location on the
+ * server, and the next inventory refresh brings it back.
+ */
+export async function deleteLocationOffline(id: string) {
+  await locationsDelete(id);
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("loc"),
+    entity: "location",
+    operation: "delete",
+    payload: { id },
+  });
+}
+
 /**
  * Records a stock adjustment locally and queues it. The movement stays `synced: 0` until the
  * server acknowledges it, so on-hand includes it immediately without double counting once the
@@ -481,6 +543,23 @@ async function applyChanges(changes: SyncPullChange[]) {
       const product_id = String(record?.product_id ?? "");
       if (!product_group_id || !product_id) continue;
       await productGroupMembershipsUpsert({ id, product_group_id, product_id, updated_at: change.created_at });
+      continue;
+    }
+
+    if (change.entity === "location") {
+      if (operation === "delete") {
+        await locationsDelete(id);
+        continue;
+      }
+      const name = String(record?.name ?? "");
+      if (!name) continue;
+      await locationsUpsert({
+        id,
+        name,
+        type: record?.type ? String(record.type) : "shop",
+        address: record?.address ? String(record.address) : null,
+        updated_at: change.created_at,
+      });
       continue;
     }
 

@@ -3,7 +3,7 @@ import React from "react";
 import { Pressable, View } from "react-native";
 
 import { useSession } from "@/auth/session";
-import { variantsSearch, type VariantRow } from "@/catalog/variants";
+import { variantsSearch, type VariantSearchHit } from "@/catalog/variants";
 import { formatQuantity, parseDelta } from "@/inventory/lib/quantity";
 import { createInventoryAdjustmentOffline } from "@/sync/syncEngine";
 import { AppText, Badge, Button, Card, Screen, SelectField, Stack, TextField } from "@/ui/components";
@@ -12,7 +12,7 @@ import { useToast } from "@/ui/toast";
 
 import { useInventoryData } from "../hooks/useInventoryData";
 
-type SearchHit = VariantRow & { product_name: string | null };
+type SearchHit = VariantSearchHit;
 
 export default function StockAdjustmentScreen() {
   const toast = useToast();
@@ -35,7 +35,9 @@ export default function StockAdjustmentScreen() {
   React.useEffect(() => {
     let cancelled = false;
     (async () => {
-      const results = await variantsSearch(query, 8);
+      // Archived items are still adjustable: writing off the remaining stock is usually the
+      // reason the product was archived in the first place.
+      const results = await variantsSearch(query, 8, { includeArchived: true });
       if (!cancelled) setHits(results);
     })();
     return () => {
@@ -80,7 +82,10 @@ export default function StockAdjustmentScreen() {
             {variant ? (
               <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
                 <View style={{ flexShrink: 1 }}>
-                  <AppText variant="label">{variant.product_name ?? "Product"}</AppText>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <AppText variant="label">{variant.product_name ?? "Product"}</AppText>
+                    {variant.product_status === "archived" ? <Badge tone="neutral" label="Archived" /> : null}
+                  </View>
                   <AppText muted>{variant.sku}</AppText>
                 </View>
                 <Button
@@ -114,7 +119,10 @@ export default function StockAdjustmentScreen() {
                       pressed && { opacity: 0.85 },
                     ]}
                   >
-                    <AppText variant="label">{hit.product_name ?? "Product"}</AppText>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <AppText variant="label">{hit.product_name ?? "Product"}</AppText>
+                      {hit.product_status === "archived" ? <Badge tone="neutral" label="Archived" /> : null}
+                    </View>
                     <AppText muted>{hit.sku}</AppText>
                   </Pressable>
                 ))}

@@ -9,7 +9,16 @@ module Api
         return if performed?
  
         products = Product.where(org_id: current_organization.id).order(created_at: :desc)
- 
+
+        status = params[:status].presence
+        if status.present?
+          unless Product::STATUSES.include?(status)
+            return render_error(code: "invalid_status", message: "Invalid status", status: :unprocessable_entity)
+          end
+
+          products = products.where(status: status)
+        end
+
         render json: {
           products: products.map { |product| product_payload(product) }
         }

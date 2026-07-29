@@ -1,6 +1,9 @@
 module OfflineSync
   class ProcessPending
     SUPPORTED_OPERATIONS = %w[create update delete].freeze
+    # Mirrors the location_type pg enum; a bad value would otherwise surface as a raw
+    # StatementInvalid and poison the surrounding transaction.
+    LOCATION_TYPES = %w[shop warehouse].freeze
 
     def self.call(org_id:, limit: 100)
       new(org_id:, limit:).call
@@ -74,6 +77,10 @@ module OfflineSync
         return apply_inventory_adjustment(item)
       end
 
+      if item.entity == "location"
+        return apply_location(item)
+      end
+
       { status: "applied", entity_id: nil, record: nil, error: nil }
     rescue StandardError => e
       { status: "failed", entity_id: nil, record: nil, error: e.message }
@@ -92,7 +99,7 @@ module OfflineSync
 
         category =
           begin
-            Category.create!(id: requested_id, org_id: org_id, name: name, parent_id: parent_id)
+            with_savepoint { Category.create!(id: requested_id, org_id: org_id, name: name, parent_id: parent_id) }
           rescue ActiveRecord::RecordNotUnique
             Category.find_by!(org_id: org_id, name: name)
           end
@@ -151,7 +158,7 @@ module OfflineSync
         product =
           begin
             attrs = { id: requested_id, org_id: org_id, name: name, category_id: category_id, status: status }.compact
-            Product.create!(attrs)
+            with_savepoint { Product.create!(attrs) }
           rescue ActiveRecord::RecordNotUnique
             Product.find_by!(org_id: org_id, name: name)
           end
@@ -224,7 +231,7 @@ module OfflineSync
               price: price,
               cost_price: cost_price
             }.compact
-            Variant.create!(create_attrs.merge({ attrs: (variant_attrs.presence || {}) }))
+            with_savepoint { Variant.create!(create_attrs.merge({ attrs: (variant_attrs.presence || {}) })) }
           rescue ActiveRecord::RecordNotUnique
             Variant.find_by!(org_id: org_id, sku: sku)
           end
@@ -302,7 +309,7 @@ module OfflineSync
 
         group =
           begin
-            ProductGroup.create!(id: requested_id, org_id: org_id, name: name, variant_options: variant_options)
+            with_savepoint { ProductGroup.create!(id: requested_id, org_id: org_id, name: name, variant_options: variant_options) }
           rescue ActiveRecord::RecordNotUnique
             ProductGroup.find_by!(org_id: org_id, name: name)
           end
@@ -365,12 +372,14 @@ module OfflineSync
 
         membership =
           begin
-            ProductGroupMembership.create!(
-              id: requested_id,
-              org_id: org_id,
-              product_group_id: product_group_id,
-              product_id: product_id
-            )
+            with_savepoint do
+              ProductGroupMembership.create!(
+                id: requested_id,
+                org_id: org_id,
+                product_group_id: product_group_id,
+                product_id: product_id
+              )
+            end
           rescue ActiveRecord::RecordNotUnique
             ProductGroupMembership.find_by!(org_id: org_id, product_group_id: product_group_id, product_id: product_id)
           end
@@ -418,6 +427,99 @@ module OfflineSync
       { status: "failed", entity_id: nil, record: nil, error: "Unsupported operation: #{item.operation}" }
     rescue StandardError => e
       { status: "failed", entity_id: fetch_key(payload, :id), record: payload, error: e.message }
+    end
+
+    def apply_location(item)
+      payload = normalize_hash(item.payload)
+      org_id = item.org_id
+
+      case item.operation
+      when "create"
+        name = fetch_key(payload, :name).to_s.strip
+        requested_id = fetch_key(payload, :id).presence
+        type = normalize_location_type(fetch_key(payload, :type))
+        address = fetch_key(payload, :address).presence
+        raise ArgumentError, "Missing field: name" if name.blank?
+
+        location =
+          begin
+            with_savepoint { Location.create!(id: requested_id, org_id: org_id, name: name, type: type, address: address) }
+          rescue ActiveRecord::RecordNotUnique
+            # Either this exact command is being replayed (same id) or a second device already
+            # named the same shop — both mean the org has the location that was asked for.
+            (requested_id.present? ? Location.find_by(org_id: org_id, id: requested_id) : nil) ||
+              Location.find_by!(org_id: org_id, name: name)
+          end
+
+        return {
+          status: "applied",
+          entity_id: location.id,
+          record: { id: location.id, name: location.name, type: location.type, address: location.address },
+          error: nil
+        }
+      when "update"
+        location_id = fetch_key(payload, :id).presence
+        raise ArgumentError, "Missing field: id" if location_id.blank?
+
+        location = Location.find_by(org_id: org_id, id: location_id)
+        return { status: "applied", entity_id: location_id, record: { id: location_id }, error: nil } if location.blank?
+
+        updates = {}
+        updates[:name] = fetch_key(payload, :name).to_s.strip if payload.key?("name") || payload.key?(:name)
+        updates[:address] = fetch_key(payload, :address).presence if payload.key?("address") || payload.key?(:address)
+        updates[:type] = normalize_location_type(fetch_key(payload, :type)) if payload.key?("type") || payload.key?(:type)
+        raise ArgumentError, "Missing field: name" if updates.key?(:name) && updates[:name].blank?
+        location.update!(updates) if updates.any?
+
+        return {
+          status: "applied",
+          entity_id: location.id,
+          record: { id: location.id, name: location.name, type: location.type, address: location.address },
+          error: nil
+        }
+      when "delete"
+        location_id = fetch_key(payload, :id).presence
+        raise ArgumentError, "Missing field: id" if location_id.blank?
+
+        location = Location.find_by(org_id: org_id, id: location_id)
+        if location.present?
+          begin
+            # Every table that points at a location does so ON DELETE RESTRICT, so a location
+            # stock has moved through cannot go. Take the savepoint: rescuing the foreign-key
+            # violation without one would leave the outer transaction aborted.
+            Location.transaction(requires_new: true) { location.destroy! }
+          rescue ActiveRecord::StatementInvalid => e
+            # ON DELETE RESTRICT raises restrict_violation (23001), which Rails does *not* map to
+            # InvalidForeignKey (that is only 23503) — so match on the cause and let anything else
+            # through rather than reporting an unrelated failure as history.
+            raise unless e.cause.class.name.match?(/RestrictViolation|ForeignKeyViolation/)
+
+            raise ArgumentError, "Location has stock history and cannot be deleted"
+          end
+        end
+
+        return { status: "applied", entity_id: location_id, record: { id: location_id }, error: nil }
+      end
+
+      { status: "failed", entity_id: nil, record: nil, error: "Unsupported operation: #{item.operation}" }
+    rescue StandardError => e
+      { status: "failed", entity_id: fetch_key(payload, :id), record: payload, error: e.message }
+    end
+
+    # A unique-index collision is how a replay or a second device announces itself, and every
+    # apply_* handler recovers by looking the existing row up. That recovery is only reachable
+    # from inside a savepoint: the failed INSERT aborts the enclosing transaction, so without
+    # one the lookup itself blows up with "current transaction is aborted".
+    def with_savepoint
+      ActiveRecord::Base.transaction(requires_new: true) { yield }
+    end
+
+    def normalize_location_type(value)
+      type = value.to_s.strip.downcase
+      return "shop" if type.blank?
+      raise ArgumentError, "Invalid location type: #{type}" unless LOCATION_TYPES.include?(type)
+
+      type
     end
 
     # The ledger is append-only: an adjustment can only ever be created, and replaying the

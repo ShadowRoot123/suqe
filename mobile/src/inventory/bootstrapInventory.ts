@@ -3,14 +3,16 @@ import type { Session } from "@/auth/session";
 import { kvGet, kvSet } from "@/db/kv";
 import { locationsUpsert } from "@/inventory/locations";
 import { snapshotsSet } from "@/inventory/snapshots";
+import { outboxUnsettledEntityIds } from "@/sync/outbox";
 
 function bootKey(orgId: string) {
   return `inventory_bootstrap_v1.${orgId}`;
 }
 
 /**
- * Locations are not a sync entity yet and the ledger predates this device, so both are
- * seeded from REST once per org. After that the pull feed keeps on-hand current.
+ * The pull feed only carries changes since the cursor, so a fresh device would never see
+ * locations or stock that predate it. Both are seeded from REST once per org; after that the
+ * pull feed keeps them current.
  */
 export async function bootstrapInventoryIfNeeded(session: Session) {
   const existing = await kvGet(bootKey(session.orgId));
@@ -24,8 +26,13 @@ export async function bootstrapInventoryIfNeeded(session: Session) {
 export async function refreshInventoryFromServer(session: Session) {
   const api = apiForSession(session);
 
+  // A location the user just created, renamed or deleted offline is ahead of the server's copy
+  // until its command is acknowledged, so REST must not write over it.
+  const inFlight = await outboxUnsettledEntityIds("location");
+
   const locations = await api.locationsIndex();
   for (const location of locations.locations) {
+    if (inFlight.has(location.id)) continue;
     await locationsUpsert({
       id: location.id,
       name: location.name,

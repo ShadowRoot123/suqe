@@ -59,6 +59,15 @@ export async function locationsUpsert(row: {
   );
 }
 
+export async function locationsDelete(id: string) {
+  if (Platform.OS === "web") {
+    webWrite(webRead().filter((l) => l.id !== id));
+    return;
+  }
+  const db = await getDb();
+  await db.runAsync("DELETE FROM locations WHERE id = ?", [id]);
+}
+
 export async function locationsList(): Promise<LocationRow[]> {
   if (Platform.OS === "web") {
     return webRead()

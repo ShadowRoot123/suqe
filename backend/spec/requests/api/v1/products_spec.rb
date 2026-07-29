@@ -83,6 +83,41 @@ RSpec.describe "Products", type: :request do
     expect(archived.fetch("status")).to eq("archived")
   end
 
+  it "filters the index by status so archived products can be kept out of catalog listings" do
+    token, _org_id = create_org_and_get_token!
+    headers = { "Authorization" => "Bearer #{token}" }
+
+    post "/api/v1/products", params: { product: { name: "Coffee" } }, headers: headers, as: :json
+    active_id = JSON.parse(response.body).dig("product", "id")
+
+    post "/api/v1/products", params: { product: { name: "Discontinued Tea" } }, headers: headers, as: :json
+    archived_id = JSON.parse(response.body).dig("product", "id")
+    delete "/api/v1/products/#{archived_id}", headers: headers, as: :json
+    expect(response).to have_http_status(:ok)
+
+    # No filter still returns everything — the admin list needs to see archived rows.
+    get "/api/v1/products", headers: headers, as: :json
+    expect(JSON.parse(response.body).fetch("products").map { |p| p.fetch("id") }).to contain_exactly(active_id, archived_id)
+
+    get "/api/v1/products?status=active", headers: headers, as: :json
+    expect(JSON.parse(response.body).fetch("products").map { |p| p.fetch("id") }).to eq([active_id])
+
+    get "/api/v1/products?status=archived", headers: headers, as: :json
+    expect(JSON.parse(response.body).fetch("products").map { |p| p.fetch("id") }).to eq([archived_id])
+  end
+
+  it "rejects an unknown status instead of silently ignoring it" do
+    token, _org_id = create_org_and_get_token!
+    headers = { "Authorization" => "Bearer #{token}" }
+
+    get "/api/v1/products?status=inactive", headers: headers, as: :json
+    expect(response).to have_http_status(:unprocessable_entity)
+    expect(JSON.parse(response.body).fetch("code")).to eq("invalid_status")
+
+    post "/api/v1/products", params: { product: { name: "Coffee", status: "inactive" } }, headers: headers, as: :json
+    expect(response).to have_http_status(:unprocessable_entity)
+  end
+
   it "validates category ownership on create" do
     token, _org_id = create_org_and_get_token!
 

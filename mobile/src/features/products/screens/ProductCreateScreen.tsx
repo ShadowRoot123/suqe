@@ -66,7 +66,7 @@ export default function ProductCreateScreen() {
               onChange={(v) => setStatus(v)}
               options={[
                 { value: "active", label: "Active" },
-                { value: "inactive", label: "Inactive" },
+                { value: "archived", label: "Archived" },
               ]}
             />
 

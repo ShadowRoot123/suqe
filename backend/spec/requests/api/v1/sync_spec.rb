@@ -777,6 +777,277 @@ RSpec.describe "OfflineSync", type: :request do
     end
   end
 
+  it "archives a product through the sync pipeline and rejects an unknown status" do
+    org_body = create_org!
+    token = org_body.fetch("access_token")
+    org_id = org_body.dig("organization", "id")
+    product_id = SecureRandom.uuid
+
+    post "/api/v1/sync/push", params: {
+      device_id: "device-1",
+      commands: [
+        { idempotency_key: "prd-1", entity: "product", operation: "create", payload: { id: product_id, name: "Cola" } }
+      ]
+    }, headers: auth_headers(token), as: :json
+    OfflineSync::ProcessPending.call(org_id: org_id)
+    expect(Product.find_by(org_id: org_id, id: product_id).status).to eq("active")
+
+    post "/api/v1/sync/push", params: {
+      device_id: "device-1",
+      commands: [
+        { idempotency_key: "prd-2", entity: "product", operation: "update", payload: { id: product_id, status: "archived" } },
+        { idempotency_key: "prd-3", entity: "product", operation: "update", payload: { id: product_id, status: "inactive" } }
+      ]
+    }, headers: auth_headers(token), as: :json
+    OfflineSync::ProcessPending.call(org_id: org_id)
+
+    expect(Product.find_by(org_id: org_id, id: product_id).status).to eq("archived")
+
+    get "/api/v1/sync/pull", headers: auth_headers(token)
+    body = JSON.parse(response.body)
+    expect(body.fetch("acks")).to include(a_hash_including("idempotency_key" => "prd-2", "status" => "applied"))
+    expect(body.fetch("acks")).to include(a_hash_including("idempotency_key" => "prd-3", "status" => "failed"))
+    expect(body.fetch("changes")).to include(
+      a_hash_including("entity" => "product", "metadata" => a_hash_including("record" => a_hash_including("status" => "archived")))
+    )
+  end
+
+  it "recovers when two devices create the same category or product name" do
+    org_body = create_org!
+    token = org_body.fetch("access_token")
+    org_id = org_body.dig("organization", "id")
+
+    post "/api/v1/sync/push", params: {
+      device_id: "device-1",
+      commands: [
+        { idempotency_key: "cat-a", entity: "category", operation: "create", payload: { id: SecureRandom.uuid, name: "Drinks" } },
+        { idempotency_key: "cat-b", entity: "category", operation: "create", payload: { id: SecureRandom.uuid, name: "Drinks" } },
+        { idempotency_key: "prd-a", entity: "product", operation: "create", payload: { id: SecureRandom.uuid, name: "Cola" } },
+        { idempotency_key: "prd-b", entity: "product", operation: "create", payload: { id: SecureRandom.uuid, name: "Cola" } }
+      ]
+    }, headers: auth_headers(token), as: :json
+    expect(response).to have_http_status(:ok)
+
+    OfflineSync::ProcessPending.call(org_id: org_id)
+
+    expect(Category.where(org_id: org_id, name: "Drinks").count).to eq(1)
+    expect(Product.where(org_id: org_id, name: "Cola").count).to eq(1)
+
+    get "/api/v1/sync/pull", headers: auth_headers(token)
+    body = JSON.parse(response.body)
+    %w[cat-a cat-b prd-a prd-b].each do |key|
+      expect(body.fetch("acks")).to include(a_hash_including("idempotency_key" => key, "status" => "applied"))
+    end
+  end
+
+  describe "locations" do
+    def push_location!(token, key:, payload:, operation: "create")
+      post "/api/v1/sync/push", params: {
+        device_id: "device-1",
+        commands: [
+          { idempotency_key: key, entity: "location", operation: operation, payload: payload }
+        ]
+      }, headers: auth_headers(token), as: :json
+      expect(response).to have_http_status(:ok)
+    end
+
+    it "creates a location with the client's id and echoes it on the change feed" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+      location_id = SecureRandom.uuid
+
+      push_location!(token, key: "loc-1", payload: {
+        id: location_id, name: "Back Warehouse", type: "warehouse", address: "12 Dock Rd"
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      location = Location.find_by(org_id: org_id, id: location_id)
+      expect(location).to be_present
+      expect(location.name).to eq("Back Warehouse")
+      expect(location.type).to eq("warehouse")
+      expect(location.address).to eq("12 Dock Rd")
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      body = JSON.parse(response.body)
+      expect(body.fetch("acks")).to include(a_hash_including("idempotency_key" => "loc-1", "status" => "applied"))
+      expect(body.fetch("changes")).to include(
+        a_hash_including(
+          "entity" => "location",
+          "entity_id" => location_id,
+          "metadata" => a_hash_including(
+            "record" => a_hash_including("name" => "Back Warehouse", "type" => "warehouse", "address" => "12 Dock Rd")
+          )
+        )
+      )
+    end
+
+    it "defaults the type to shop" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+
+      push_location!(token, key: "loc-1", payload: { name: "Kiosk" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(Location.find_by(org_id: org_id, name: "Kiosk").type).to eq("shop")
+    end
+
+    it "fails a blank name or an unknown type without writing a row" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+
+      push_location!(token, key: "loc-blank", payload: { name: "  " })
+      push_location!(token, key: "loc-type", payload: { name: "Depot", type: "spaceport" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(Location.where(org_id: org_id).count).to eq(0)
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      body = JSON.parse(response.body)
+      %w[loc-blank loc-type].each do |key|
+        expect(body.fetch("acks")).to include(a_hash_including("idempotency_key" => key, "status" => "failed"))
+      end
+    end
+
+    it "does not create a second row when two devices send the same name" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+
+      push_location!(token, key: "loc-a", payload: { id: SecureRandom.uuid, name: "Main Shop" })
+      push_location!(token, key: "loc-b", payload: { id: SecureRandom.uuid, name: "Main Shop" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(Location.where(org_id: org_id, name: "Main Shop").count).to eq(1)
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      body = JSON.parse(response.body)
+      expect(body.fetch("acks")).to include(a_hash_including("idempotency_key" => "loc-b", "status" => "applied"))
+    end
+
+    it "updates only the fields the command carries" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+      location_id = SecureRandom.uuid
+
+      push_location!(token, key: "loc-1", payload: {
+        id: location_id, name: "Main Shop", type: "shop", address: "1 High St"
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      push_location!(token, key: "loc-2", operation: "update", payload: { id: location_id, name: "Flagship Shop" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      location = Location.find_by(org_id: org_id, id: location_id)
+      expect(location.name).to eq("Flagship Shop")
+      expect(location.address).to eq("1 High St")
+    end
+
+    it "deletes a location that has no inventory history" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+      location_id = SecureRandom.uuid
+
+      push_location!(token, key: "loc-1", payload: { id: location_id, name: "Pop-up" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      push_location!(token, key: "loc-2", operation: "delete", payload: { id: location_id })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(Location.find_by(org_id: org_id, id: location_id)).to be_nil
+    end
+
+    it "refuses to delete a location that stock has moved through" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+      product_id = SecureRandom.uuid
+      variant_id = SecureRandom.uuid
+      location_id = SecureRandom.uuid
+
+      post "/api/v1/sync/push", params: {
+        device_id: "device-1",
+        commands: [
+          { idempotency_key: "p", entity: "product", operation: "create", payload: { id: product_id, name: "Cola" } },
+          { idempotency_key: "v", entity: "variant", operation: "create", payload: { id: variant_id, product_id: product_id, sku: "COLA" } },
+          { idempotency_key: "loc-1", entity: "location", operation: "create", payload: { id: location_id, name: "Main Shop" } }
+        ]
+      }, headers: auth_headers(token), as: :json
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      post "/api/v1/sync/push", params: {
+        device_id: "device-1",
+        commands: [
+          {
+            idempotency_key: "adj-1",
+            entity: "inventory_adjustment",
+            operation: "create",
+            payload: { variant_id: variant_id, location_id: location_id, quantity_delta: "5" }
+          }
+        ]
+      }, headers: auth_headers(token), as: :json
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      push_location!(token, key: "loc-del", operation: "delete", payload: { id: location_id })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(Location.find_by(org_id: org_id, id: location_id)).to be_present
+      expect(Inventory::OnHand.for(org_id: org_id, variant_id: variant_id)).to eq(5.to_d)
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      body = JSON.parse(response.body)
+      expect(body.fetch("acks")).to include(a_hash_including("idempotency_key" => "loc-del", "status" => "failed"))
+      # Postgres raises restrict_violation here, which Rails does not map to InvalidForeignKey;
+      # without the cause check the client would get a raw PG::RestrictViolation dump instead.
+      expect(body.fetch("changes")).to include(
+        a_hash_including(
+          "entity" => "location",
+          "metadata" => a_hash_including("error" => "Location has stock history and cannot be deleted")
+        )
+      )
+    end
+
+    it "does not create a duplicate when a command is reprocessed" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+      location_id = SecureRandom.uuid
+
+      push_location!(token, key: "loc-1", payload: { id: location_id, name: "Main Shop" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      # Simulates a crash between applying the command and marking it applied.
+      SyncOutbox.where(org_id: org_id, idempotency_key: "loc-1").update_all(status: "pending")
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(Location.where(org_id: org_id).count).to eq(1)
+      expect(SyncOutbox.find_by(org_id: org_id, idempotency_key: "loc-1").status).to eq("applied")
+    end
+
+    it "does not leak locations across orgs" do
+      org_a = create_org!
+      post "/api/v1/orgs", params: {
+        name: "Other Shop",
+        owner: { name: "Other", email: "other@example.com", password: "secret123" }
+      }, as: :json
+      org_b = JSON.parse(response.body)
+
+      location_id = SecureRandom.uuid
+      push_location!(org_a.fetch("access_token"), key: "loc-1", payload: { id: location_id, name: "Main Shop" })
+      OfflineSync::ProcessPending.call(org_id: org_a.dig("organization", "id"))
+
+      push_location!(org_b.fetch("access_token"), key: "loc-2", operation: "update", payload: { id: location_id, name: "Hijacked" })
+      OfflineSync::ProcessPending.call(org_id: org_b.dig("organization", "id"))
+
+      expect(Location.find(location_id).name).to eq("Main Shop")
+      expect(Location.where(org_id: org_b.dig("organization", "id")).count).to eq(0)
+    end
+  end
+
   it "marks variant create as failed when missing sku" do
     org_body = create_org!
     token = org_body.fetch("access_token")

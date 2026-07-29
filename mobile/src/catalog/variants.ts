@@ -118,21 +118,37 @@ export async function variantsGetById(id: string): Promise<VariantRow | null> {
   return row ?? null;
 }
 
-export async function variantsSearch(query: string, limit = 20): Promise<(VariantRow & { product_name: string | null })[]> {
+export type VariantSearchHit = VariantRow & { product_name: string | null; product_status: string | null };
+
+/**
+ * Search is the path into the cart, so archived products stay out of it by default
+ * (FR-CAT-01: archived items cannot be sold). Stock adjustments pass `includeArchived` —
+ * writing off what is left is exactly why a product gets archived.
+ */
+export async function variantsSearch(
+  query: string,
+  limit = 20,
+  options: { includeArchived?: boolean } = {}
+): Promise<VariantSearchHit[]> {
   const q = query.trim();
   if (!q) return [];
+  const includeArchived = options.includeArchived ?? false;
 
   if (Platform.OS === "web") {
     const variants = webRead();
     const productsRaw = globalThis.localStorage?.getItem("myshop.products.v1");
     const products = productsRaw ? (JSON.parse(productsRaw) as any[]) : [];
     const byProductId = new Map<string, string>();
+    const statusByProductId = new Map<string, string>();
     for (const p of products) {
-      if (p?.id && p?.name) byProductId.set(String(p.id), String(p.name));
+      if (!p?.id) continue;
+      if (p?.name) byProductId.set(String(p.id), String(p.name));
+      if (p?.status) statusByProductId.set(String(p.id), String(p.status));
     }
     const needle = q.toLowerCase();
     return variants
       .filter((v) => {
+        if (!includeArchived && statusByProductId.get(v.product_id) === "archived") return false;
         const name = byProductId.get(v.product_id)?.toLowerCase() ?? "";
         return (
           v.sku.toLowerCase().includes(needle) ||
@@ -141,13 +157,22 @@ export async function variantsSearch(query: string, limit = 20): Promise<(Varian
         );
       })
       .slice(0, limit)
-      .map((v) => ({ ...v, product_name: byProductId.get(v.product_id) ?? null }));
+      .map((v) => ({
+        ...v,
+        product_name: byProductId.get(v.product_id) ?? null,
+        product_status: statusByProductId.get(v.product_id) ?? null,
+      }));
   }
 
   const db = await getDb();
   const like = `%${q.replace(/%/g, "\\%").replace(/_/g, "\\_")}%`;
-  return await db.getAllAsync<(VariantRow & { product_name: string | null })>(
-    "SELECT v.*, p.name as product_name FROM variants v LEFT JOIN products p ON p.id = v.product_id WHERE v.sku LIKE ? ESCAPE '\\' OR v.barcode LIKE ? ESCAPE '\\' OR p.name LIKE ? ESCAPE '\\' ORDER BY v.updated_at DESC LIMIT ?",
+  // A variant whose product row hasn't synced yet still has to be findable, so only a product
+  // that is present *and* archived is excluded.
+  const archivedClause = includeArchived ? "" : " AND (p.status IS NULL OR p.status != 'archived')";
+  return await db.getAllAsync<VariantSearchHit>(
+    "SELECT v.*, p.name as product_name, p.status as product_status FROM variants v LEFT JOIN products p ON p.id = v.product_id WHERE (v.sku LIKE ? ESCAPE '\\' OR v.barcode LIKE ? ESCAPE '\\' OR p.name LIKE ? ESCAPE '\\')" +
+      archivedClause +
+      " ORDER BY v.updated_at DESC LIMIT ?",
     [like, like, like, limit]
   );
 }
