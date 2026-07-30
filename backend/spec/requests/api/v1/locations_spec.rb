@@ -95,5 +95,51 @@ RSpec.describe "Locations", type: :request do
     body = JSON.parse(response.body)
     expect(body.fetch("code")).to eq("not_unique")
   end
+
+  # These two cover the shared handler in ApplicationController, not anything specific to
+  # locations. `locations` is just the easiest subject: seven foreign keys point at it, all
+  # ON DELETE RESTRICT, and this controller's destroy has no rescue of its own.
+  describe "deleting a location that is referenced" do
+    def create_variant!(org_id)
+      product = Product.create!(org_id: org_id, name: "Coffee")
+      Variant.create!(org_id: org_id, product_id: product.id, sku: "SKU-FK-1", attrs: {})
+    end
+
+    # Postgres raises restrict_violation (23001) for ON DELETE RESTRICT, and Rails maps only
+    # 23503 to InvalidForeignKey — so this used to escape as a StatementInvalid and 500.
+    it "returns 409 rather than a 500" do
+      token, org_id = create_org_and_get_token!
+      location = Location.create!(org_id: org_id, name: "Main Shop", type: "shop")
+      Inventory::RecordMovement.call(
+        org_id: org_id,
+        variant_id: create_variant!(org_id).id,
+        location_id: location.id,
+        quantity_delta: "5"
+      )
+
+      delete "/api/v1/locations/#{location.id}",
+             headers: { "Authorization" => "Bearer #{token}" },
+             as: :json
+
+      expect(response).to have_http_status(:conflict)
+      expect(JSON.parse(response.body).fetch("code")).to eq("invalid_foreign_key")
+      expect(Location.find_by(id: location.id)).to be_present
+    end
+
+    # The handler matches on the violation, so an unrelated database error must still surface as
+    # itself instead of being reported to the caller as a foreign-key conflict.
+    it "does not swallow an unrelated SQL error" do
+      token, org_id = create_org_and_get_token!
+      location = Location.create!(org_id: org_id, name: "Main Shop", type: "shop")
+      allow_any_instance_of(Location).to receive(:destroy!)
+        .and_raise(ActiveRecord::StatementInvalid.new("PG::UndefinedColumn: column does not exist"))
+
+      expect {
+        delete "/api/v1/locations/#{location.id}",
+               headers: { "Authorization" => "Bearer #{token}" },
+               as: :json
+      }.to raise_error(ActiveRecord::StatementInvalid, /UndefinedColumn/)
+    end
+  end
 end
 

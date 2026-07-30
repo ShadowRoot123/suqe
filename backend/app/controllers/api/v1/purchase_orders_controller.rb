@@ -32,7 +32,12 @@ module Api
         require_permission!("purchasing.read")
         return if performed?
 
-        orders = PurchaseOrder.where(org_id: current_organization.id).order(created_at: :desc)
+        # Lines come with the index because this is the offline client's bootstrap read: fetching
+        # them per order would be 200 round trips to fill one local store.
+        orders = PurchaseOrder
+          .where(org_id: current_organization.id)
+          .includes(:purchase_items)
+          .order(created_at: :desc)
 
         if params[:status].present?
           status = Purchasing::OrderLifecycle.normalize(params[:status])
@@ -45,7 +50,7 @@ module Api
         end
         orders = orders.where(supplier_id: params[:supplier_id]) if params[:supplier_id].present?
 
-        render json: { purchase_orders: orders.limit(200).map { |po| purchase_order_payload(po) } }
+        render json: { purchase_orders: orders.limit(200).map { |po| purchase_order_payload(po, include_items: true) } }
       end
 
       def show

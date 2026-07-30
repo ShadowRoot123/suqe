@@ -47,8 +47,6 @@ module Api
 
         @role.destroy!
         head :no_content
-      rescue ActiveRecord::InvalidForeignKey
-        render_error(code: "invalid_foreign_key", message: "Record is referenced by other records", status: :conflict)
       end
 
       private

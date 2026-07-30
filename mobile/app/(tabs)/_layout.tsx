@@ -58,6 +58,13 @@ export default function TabsLayout() {
         }}
       />
       <Drawer.Screen
+        name="purchasing"
+        options={{
+          title: "Purchasing",
+          drawerIcon: ({ color, size }) => <Ionicons name="cart-outline" color={color} size={size} />,
+        }}
+      />
+      <Drawer.Screen
         name="pos"
         options={{
           title: "Point of Sale",

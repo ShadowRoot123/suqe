@@ -155,12 +155,49 @@ export type InventoryMovement = {
   idempotency_key: string | null;
 };
 
+export type Supplier = {
+  id: string;
+  org_id: string;
+  name: string;
+  phone: string | null;
+  email: string | null;
+  address: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type PurchaseOrderItem = {
+  id: string;
+  purchase_order_id: string;
+  variant_id: string;
+  quantity_ordered: string;
+  unit_cost: string;
+};
+
+export type PurchaseOrder = {
+  id: string;
+  org_id: string;
+  supplier_id: string;
+  location_id: string;
+  status: string;
+  expected_at: string | null;
+  total_cost: string;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+  /** Present on both index and show — the index carries lines so a fresh device can fill its store. */
+  items?: PurchaseOrderItem[];
+};
+
 export type CategoriesIndexResponse = { categories: Category[] };
 export type ProductsIndexResponse = { products: Product[] };
 export type VariantsIndexResponse = { variants: Variant[] };
 export type LocationsIndexResponse = { locations: Location[] };
 export type InventorySnapshotsIndexResponse = { inventory_snapshots: InventorySnapshot[] };
 export type StockThresholdsIndexResponse = { stock_thresholds: StockThreshold[] };
+export type SuppliersIndexResponse = { suppliers: Supplier[] };
+export type PurchaseOrdersIndexResponse = { purchase_orders: PurchaseOrder[] };
+export type PurchaseOrderShowResponse = { purchase_order: PurchaseOrder };
 export type LowStockIndexResponse = { low_stock: LowStockRow[] };
 /** `next_cursor` is null on the last page — the keyset cursor, not an offset. */
 export type InventoryMovementsIndexResponse = { inventory_movements: InventoryMovement[]; next_cursor: string | null };
@@ -205,6 +242,18 @@ export function apiForSession(session: Session | null) {
       client.request<InventorySnapshotsIndexResponse>({ path: "/inventory_snapshots" }).then((r) => r.data),
     stockThresholdsIndex: () =>
       client.request<StockThresholdsIndexResponse>({ path: "/stock_thresholds" }).then((r) => r.data),
+    suppliersIndex: () => client.request<SuppliersIndexResponse>({ path: "/suppliers" }).then((r) => r.data),
+    purchaseOrdersIndex: (args?: { status?: string | null; supplier_id?: string | null }) => {
+      const params = new URLSearchParams();
+      if (args?.status) params.set("status", args.status);
+      if (args?.supplier_id) params.set("supplier_id", args.supplier_id);
+      const query = params.toString();
+      return client
+        .request<PurchaseOrdersIndexResponse>({ path: query ? `/purchase_orders?${query}` : "/purchase_orders" })
+        .then((r) => r.data);
+    },
+    purchaseOrderShow: (id: string) =>
+      client.request<PurchaseOrderShowResponse>({ path: `/purchase_orders/${id}` }).then((r) => r.data),
     lowStockIndex: (args?: { location_id?: string | null }) => {
       const params = new URLSearchParams();
       if (args?.location_id) params.set("location_id", args.location_id);

@@ -5,6 +5,7 @@ import { Platform } from "react-native";
 import { apiForSession } from "@/api/endpoints";
 import { bootstrapCatalogIfNeeded } from "@/catalog/bootstrapCatalog";
 import { bootstrapInventoryIfNeeded } from "@/inventory/bootstrapInventory";
+import { bootstrapPurchasingIfNeeded } from "@/purchasing/bootstrapPurchasing";
 import { onUnauthorized } from "@/auth/unauthorized";
 import { SESSION_STORAGE_KEY } from "@/shared/constants";
 
@@ -102,6 +103,7 @@ export function SessionProvider(props: { children: React.ReactNode }) {
     if (!session) return;
     void bootstrapCatalogIfNeeded(session);
     void bootstrapInventoryIfNeeded(session).catch(() => {});
+    void bootstrapPurchasingIfNeeded(session).catch(() => {});
   }, [isHydrating, session]);
 
   const setSession = React.useCallback(async (next: Session) => {

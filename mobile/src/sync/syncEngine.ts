@@ -11,6 +11,17 @@ import { locationsDelete, locationsGetById, locationsUpsert } from "@/inventory/
 import { movementsDelete, movementsUpsert } from "@/inventory/movements";
 import { snapshotsSet } from "@/inventory/snapshots";
 import { thresholdsDelete, thresholdsFindTarget, thresholdsUpsert } from "@/inventory/thresholds";
+import { formatMoney, parseMoney } from "@/purchasing/lib/money";
+import { isEditable, transitionError, type OrderStatus } from "@/purchasing/lib/orderLifecycle";
+import {
+  ordersDelete,
+  ordersExistForSupplier,
+  ordersGetById,
+  ordersSetStatus,
+  ordersUpsert,
+  type OrderLineRow,
+} from "@/purchasing/orders";
+import { suppliersDelete, suppliersGetById, suppliersUpsert } from "@/purchasing/suppliers";
 import { getDeviceId } from "@/sync/device";
 import { makeIdempotencyKey } from "@/sync/idempotency";
 import { outboxListPending, outboxMarkStatusByIdempotencyKey } from "@/sync/outbox";
@@ -507,6 +518,267 @@ export async function deleteStockThresholdOffline(id: string) {
   });
 }
 
+export async function createSupplierOffline(args: {
+  name: string;
+  phone?: string | null;
+  email?: string | null;
+  address?: string | null;
+}) {
+  const id = makeUuid();
+  const now = new Date().toISOString();
+  const name = args.name.trim();
+  if (!name) throw new Error("Name is required");
+
+  const contact = {
+    phone: args.phone?.trim() || null,
+    email: args.email?.trim() || null,
+    address: args.address?.trim() || null,
+  };
+
+  await suppliersUpsert({ id, name, ...contact, updated_at: now });
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("sup"),
+    entity: "supplier",
+    operation: "create",
+    payload: { id, name, ...contact },
+  });
+
+  return id;
+}
+
+export async function updateSupplierOffline(args: {
+  id: string;
+  name: string;
+  phone?: string | null;
+  email?: string | null;
+  address?: string | null;
+}) {
+  const now = new Date().toISOString();
+  const name = args.name.trim();
+  if (!name) throw new Error("Name is required");
+
+  const existing = await suppliersGetById(args.id);
+  if (!existing) throw new Error("Supplier not found");
+
+  // A field the caller left undefined keeps its current value; an empty string clears it, and the
+  // command carries the null so the server stops sending the old one back.
+  const contact = {
+    phone: args.phone === undefined ? existing.phone : args.phone?.trim() || null,
+    email: args.email === undefined ? existing.email : args.email?.trim() || null,
+    address: args.address === undefined ? existing.address : args.address?.trim() || null,
+  };
+
+  await suppliersUpsert({ id: args.id, name, ...contact, updated_at: now });
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("sup"),
+    entity: "supplier",
+    operation: "update",
+    payload: { id: args.id, name, ...contact },
+  });
+}
+
+/**
+ * The server refuses to delete a supplier the org has ordered from. The local store knows about
+ * every order it has seen, so the obvious case is caught here and the user is told immediately;
+ * an order this device has never pulled still gets refused server-side, and the next purchasing
+ * refresh brings the supplier back.
+ */
+export async function deleteSupplierOffline(id: string) {
+  if (await ordersExistForSupplier(id)) {
+    throw new Error("Supplier has purchase orders and cannot be deleted");
+  }
+
+  await suppliersDelete(id);
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("sup"),
+    entity: "supplier",
+    operation: "delete",
+    payload: { id },
+  });
+}
+
+const ISO_DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+const ISO_DATETIME = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/;
+
+/**
+ * Mirrors `parse_time` in process_pending.rb: strictly ISO 8601, with a date on its own accepted
+ * because a delivery-date picker has no reason to carry a time. The server rejects anything else,
+ * so catching it here turns a command that would fail after the next push into an error the user
+ * sees while the field is still in front of them.
+ */
+function normalizeExpectedAt(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  if (!ISO_DATE_ONLY.test(trimmed) && !ISO_DATETIME.test(trimmed)) {
+    throw new Error("Expected date must look like 2026-08-20");
+  }
+  if (Number.isNaN(new Date(trimmed).getTime())) throw new Error("Expected date is not a real date");
+
+  return trimmed;
+}
+
+export type PurchaseOrderLineInput = {
+  id?: string | null;
+  variant_id: string;
+  quantity_ordered: string | number;
+  unit_cost: string | number;
+};
+
+/**
+ * Validates lines the way `Purchasing::OrderLines` does, so a bad row is refused before anything is
+ * queued rather than coming back as a failed command. Line ids are generated here when absent: the
+ * client owns them, which is what lets an edit keep a surviving row's identity.
+ */
+function normalizeOrderLines(items: PurchaseOrderLineInput[] | undefined): OrderLineRow[] {
+  const lines: OrderLineRow[] = [];
+  const seen = new Set<string>();
+
+  for (const item of items ?? []) {
+    if (!item?.variant_id) throw new Error("Every line needs an item");
+    if (seen.has(item.variant_id)) throw new Error("The same item is on two lines");
+    seen.add(item.variant_id);
+
+    const quantity = parseQuantity(item.quantity_ordered);
+    if (quantity === null) throw new Error("Quantity must be a number");
+    if (quantity <= 0) throw new Error("Quantity must be greater than zero");
+
+    const cost = parseMoney(item.unit_cost);
+    if (cost === null) throw new Error("Unit cost must be a number");
+    if (cost < 0) throw new Error("Unit cost must not be negative");
+
+    lines.push({
+      id: item.id || makeUuid(),
+      variant_id: item.variant_id,
+      quantity_ordered: formatQuantity(quantity),
+      unit_cost: formatMoney(cost),
+    });
+  }
+
+  return lines;
+}
+
+export async function createPurchaseOrderOffline(args: {
+  supplier_id: string;
+  location_id: string;
+  expected_at?: string | null;
+  items?: PurchaseOrderLineInput[];
+  created_by?: string | null;
+}) {
+  if (!args.supplier_id) throw new Error("Choose a supplier");
+  if (!args.location_id) throw new Error("Choose a delivery location");
+
+  const id = makeUuid();
+  const now = new Date().toISOString();
+  const items = normalizeOrderLines(args.items);
+  const expected_at = normalizeExpectedAt(args.expected_at);
+
+  await ordersUpsert({
+    id,
+    supplier_id: args.supplier_id,
+    location_id: args.location_id,
+    status: "draft",
+    expected_at,
+    created_by: args.created_by ?? null,
+    items,
+    updated_at: now,
+  });
+
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("po"),
+    entity: "purchase_order",
+    operation: "create",
+    payload: {
+      id,
+      supplier_id: args.supplier_id,
+      location_id: args.location_id,
+      status: "draft",
+      expected_at,
+      items,
+      created_by: args.created_by ?? null,
+    },
+  });
+
+  return id;
+}
+
+/** Edits a draft's header and lines. The whole line set travels, because that is the contract. */
+export async function updatePurchaseOrderOffline(args: {
+  id: string;
+  supplier_id?: string;
+  location_id?: string;
+  expected_at?: string | null;
+  items?: PurchaseOrderLineInput[];
+}) {
+  const existing = await ordersGetById(args.id);
+  if (!existing) throw new Error("Purchase order not found");
+  if (!isEditable(existing.status)) {
+    throw new Error(`Cannot edit a purchase order that is ${existing.status}`);
+  }
+
+  const now = new Date().toISOString();
+  const supplier_id = args.supplier_id ?? existing.supplier_id;
+  const location_id = args.location_id ?? existing.location_id;
+  const expected_at = args.expected_at === undefined ? existing.expected_at : normalizeExpectedAt(args.expected_at);
+  const items = args.items === undefined ? existing.items : normalizeOrderLines(args.items);
+
+  await ordersUpsert({
+    id: args.id,
+    supplier_id,
+    location_id,
+    status: existing.status,
+    expected_at,
+    created_by: existing.created_by,
+    items,
+    updated_at: now,
+  });
+
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("po"),
+    entity: "purchase_order",
+    operation: "update",
+    payload: { id: args.id, supplier_id, location_id, expected_at, items },
+  });
+}
+
+/**
+ * Moves an order along the lifecycle. The transition is checked locally first — the mirror of the
+ * server's table in purchasing/lib/orderLifecycle.ts — so an illegal move is refused while the
+ * user is still looking at the button instead of failing on a push minutes later.
+ */
+export async function transitionPurchaseOrderOffline(args: { id: string; status: OrderStatus }) {
+  const existing = await ordersGetById(args.id);
+  if (!existing) throw new Error("Purchase order not found");
+
+  const error = transitionError({ from: existing.status, to: args.status, lineCount: existing.items.length });
+  if (error) throw new Error(error);
+  if (existing.status === args.status) return;
+
+  await ordersSetStatus(args.id, args.status);
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("po"),
+    entity: "purchase_order",
+    operation: "update",
+    // Status only: a full payload would re-send the lines, and the server refuses line edits on
+    // anything past draft — approving an order would fail on its own command.
+    payload: { id: args.id, status: args.status },
+  });
+}
+
+export async function deletePurchaseOrderOffline(id: string) {
+  const existing = await ordersGetById(id);
+  if (existing && !isEditable(existing.status)) {
+    throw new Error(`Cannot delete a purchase order that is ${existing.status}`);
+  }
+
+  await ordersDelete(id);
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("po"),
+    entity: "purchase_order",
+    operation: "delete",
+    payload: { id },
+  });
+}
+
 async function applyChanges(changes: SyncPullChange[]) {
   for (const change of changes) {
     const operation = String((change.metadata as any)?.operation ?? "");
@@ -524,6 +796,17 @@ async function applyChanges(changes: SyncPullChange[]) {
       // leaving the row would show a low-stock badge no other device agrees with.
       if (change.entity === "stock_threshold" && operation === "create") {
         await thresholdsDelete(id);
+      }
+      if (change.entity === "supplier" && operation === "create") {
+        await suppliersDelete(id);
+      }
+      // A refused order create never landed on the server, so the optimistic row goes. A refused
+      // *update* — a transition another device already made illegal — leaves the local status
+      // ahead of the server's, and the failed change carries the rejected command rather than the
+      // surviving row, so there is nothing here to restore it from. The next purchasing refresh
+      // corrects it; same limitation as a refused location delete.
+      if (change.entity === "purchase_order" && operation === "create") {
+        await ordersDelete(id);
       }
       continue;
     }
@@ -640,6 +923,54 @@ async function applyChanges(changes: SyncPullChange[]) {
         location_id: record?.location_id ? String(record.location_id) : null,
         reorder_point: record?.reorder_point ?? "0",
         reorder_quantity: record?.reorder_quantity ?? null,
+        updated_at: change.created_at,
+      });
+      continue;
+    }
+
+    if (change.entity === "supplier") {
+      if (operation === "delete") {
+        await suppliersDelete(id);
+        continue;
+      }
+      const name = String(record?.name ?? "");
+      // An update the server no-opped (a row from another org, say) carries only an id; the local
+      // copy is already right, so there is nothing to fold in.
+      if (!name) continue;
+
+      await suppliersUpsert({
+        id,
+        name,
+        phone: record?.phone ? String(record.phone) : null,
+        email: record?.email ? String(record.email) : null,
+        address: record?.address ? String(record.address) : null,
+        updated_at: change.created_at,
+      });
+      continue;
+    }
+
+    if (change.entity === "purchase_order") {
+      if (operation === "delete") {
+        await ordersDelete(id);
+        continue;
+      }
+
+      const supplier_id = String(record?.supplier_id ?? "");
+      const location_id = String(record?.location_id ?? "");
+      if (!supplier_id || !location_id) continue;
+
+      // The server's record is authoritative for the whole order, lines included: it recomputed
+      // the total from the lines it actually stored, and a duplicate create may have resolved onto
+      // a row this device has not seen.
+      await ordersUpsert({
+        id,
+        supplier_id,
+        location_id,
+        status: record?.status ? String(record.status) : "draft",
+        expected_at: record?.expected_at ? String(record.expected_at) : null,
+        total_cost: record?.total_cost ?? null,
+        created_by: record?.created_by ? String(record.created_by) : null,
+        items: record?.items ?? [],
         updated_at: change.created_at,
       });
       continue;

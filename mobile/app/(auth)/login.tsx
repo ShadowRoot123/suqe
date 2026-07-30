@@ -7,6 +7,7 @@ import { ApiError } from "@/api/errors";
 import { useSession } from "@/auth/session";
 import { bootstrapCatalogIfNeeded } from "@/catalog/bootstrapCatalog";
 import { bootstrapInventoryIfNeeded } from "@/inventory/bootstrapInventory";
+import { bootstrapPurchasingIfNeeded } from "@/purchasing/bootstrapPurchasing";
 import { useToast } from "@/ui/toast";
 import { toErrorMessage } from "@/util/errorMessage";
 
@@ -46,6 +47,9 @@ export default function Login() {
       } catch {}
       try {
         await bootstrapInventoryIfNeeded(nextSession);
+      } catch {}
+      try {
+        await bootstrapPurchasingIfNeeded(nextSession);
       } catch {}
       router.replace("/(tabs)/dashboard");
     } catch (e) {

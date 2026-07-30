@@ -43,21 +43,10 @@ module Api
         require_permission!("purchasing.write")
         return if performed?
 
+        # A supplier the org has ordered from is protected by ON DELETE RESTRICT; the shared
+        # handler in ApplicationController turns that into a 409.
         @supplier.destroy!
         head :no_content
-      rescue ActiveRecord::InvalidForeignKey
-        render_error(code: "invalid_foreign_key", message: "Record is referenced by other records", status: :conflict)
-      rescue ActiveRecord::StatementInvalid => e
-        # purchase_orders.supplier_id is ON DELETE RESTRICT, and Postgres raises
-        # restrict_violation (23001) for that — which Rails does *not* map to InvalidForeignKey
-        # (that is 23503 only), so without this the caller got a 500.
-        raise unless e.cause.class.name.match?(/RestrictViolation|ForeignKeyViolation/)
-
-        render_error(
-          code: "invalid_foreign_key",
-          message: "Supplier has purchase orders and cannot be deleted",
-          status: :conflict
-        )
       end
 
       private

@@ -88,6 +88,19 @@ RSpec.describe "Purchasing order lifecycle", type: :model do
       expect(order.total_cost).to eq("13.50".to_d)
     end
 
+    # Sum the exact line products, round once. Rounding each line first would give 0.99, and the
+    # client mirrors this rule — `mobile/__tests__/orderTotals.test.ts` asserts "1.00" for the same
+    # three lines, so if either side changes its mind the pair of tests disagrees.
+    it "rounds the total once at the end rather than per line" do
+      variants = 3.times.map { |i| create_variant!(sku: "SKU-THIRD-#{i}") }
+
+      order = create_order!(
+        items: variants.map { |v| { variant_id: v.id, quantity_ordered: "0.333", unit_cost: "1.00" } }
+      )
+
+      expect(order.total_cost).to eq("1.0".to_d)
+    end
+
     # You open the order, then add to it — an empty draft is a normal starting point.
     it "opens an order with no lines at a total of zero" do
       order = create_order!

@@ -4,7 +4,7 @@ import { Platform } from "react-native";
 export type SqlDatabase = SQLiteDatabase;
 
 let dbPromise: Promise<SqlDatabase> | null = null;
-const SCHEMA_VERSION = 7;
+const SCHEMA_VERSION = 8;
 
 export async function getDb(): Promise<SqlDatabase> {
   if (!dbPromise) dbPromise = openDatabaseAsync("myshop.db");
@@ -106,6 +106,25 @@ export async function migrate() {
       "CREATE INDEX IF NOT EXISTS idx_stock_thresholds_variant ON stock_thresholds (variant_id, location_id)"
     );
     current = 7;
+    await db.execAsync(`PRAGMA user_version = ${current}`);
+  }
+
+  if (current < 8) {
+    await db.execAsync(
+      "CREATE TABLE IF NOT EXISTS suppliers (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, phone TEXT, email TEXT, address TEXT, updated_at TEXT NOT NULL)"
+    );
+    // An order's lines sit in items_json rather than a second table: they only ever travel with
+    // their header (one sync command, one screen), nothing queries across them, and one column
+    // keeps the write atomic on both platforms — see purchasing/orders.ts.
+    await db.execAsync(
+      "CREATE TABLE IF NOT EXISTS purchase_orders (id TEXT PRIMARY KEY NOT NULL, supplier_id TEXT NOT NULL, location_id TEXT NOT NULL, status TEXT NOT NULL, expected_at TEXT, total_cost TEXT NOT NULL, created_by TEXT, items_json TEXT NOT NULL DEFAULT '[]', updated_at TEXT NOT NULL)"
+    );
+    await db.execAsync("CREATE INDEX IF NOT EXISTS idx_suppliers_name ON suppliers (name)");
+    await db.execAsync(
+      "CREATE INDEX IF NOT EXISTS idx_purchase_orders_status ON purchase_orders (status, updated_at DESC)"
+    );
+    await db.execAsync("CREATE INDEX IF NOT EXISTS idx_purchase_orders_supplier ON purchase_orders (supplier_id)");
+    current = 8;
     await db.execAsync(`PRAGMA user_version = ${current}`);
   }
 

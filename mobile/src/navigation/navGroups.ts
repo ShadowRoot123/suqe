@@ -63,6 +63,14 @@ export function getNavGroups(args?: { permissions?: string[] }) {
           ],
         },
         {
+          title: "Purchasing",
+          icon: "cart-outline",
+          items: [
+            { title: "Purchase Orders", href: "/(tabs)/purchasing", requiredPermissions: ["purchasing.read"] },
+            { title: "Suppliers", href: "/(tabs)/purchasing/suppliers", requiredPermissions: ["purchasing.read"] },
+          ],
+        },
+        {
           title: "Point of Sale",
           icon: "receipt-outline",
           items: [

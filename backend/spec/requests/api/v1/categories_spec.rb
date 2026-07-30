@@ -43,6 +43,24 @@ RSpec.describe "Categories", type: :request do
     expect(response).to have_http_status(:unauthorized)
   end
 
+  # This controller has no rescue of its own, so the duplicate goes all the way to the shared
+  # handler in ApplicationController — which makes it the behavioural check that RecordNotUnique
+  # is not being shadowed there. It is a subclass of StatementInvalid, so a careless reordering of
+  # those `rescue_from` declarations turns this 409 into a re-raise.
+  it "returns not_unique for a duplicate name via the shared handler" do
+    token, _org_id = create_org_and_get_token!
+
+    2.times do
+      post "/api/v1/categories",
+           params: { category: { name: "Beverages" } },
+           headers: { "Authorization" => "Bearer #{token}" },
+           as: :json
+    end
+
+    expect(response).to have_http_status(:conflict)
+    expect(JSON.parse(response.body).fetch("code")).to eq("not_unique")
+  end
+
   it "supports CRUD for categories" do
     token, org_id = create_org_and_get_token!
 
