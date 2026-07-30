@@ -3,6 +3,7 @@ import type { Session } from "@/auth/session";
 import { kvGet, kvSet } from "@/db/kv";
 import { locationsUpsert } from "@/inventory/locations";
 import { snapshotsSet } from "@/inventory/snapshots";
+import { thresholdsUpsert } from "@/inventory/thresholds";
 import { outboxUnsettledEntityIds } from "@/sync/outbox";
 
 function bootKey(orgId: string) {
@@ -49,6 +50,22 @@ export async function refreshInventoryFromServer(session: Session) {
       location_id: snapshot.location_id,
       quantity: snapshot.quantity,
       updated_at: snapshot.updated_at,
+    });
+  }
+
+  // Reorder points predate a fresh device the same way locations do, and a low-stock badge has to
+  // work offline, so they are cached locally rather than read online.
+  const thresholdsInFlight = await outboxUnsettledEntityIds("stock_threshold");
+  const thresholds = await api.stockThresholdsIndex();
+  for (const threshold of thresholds.stock_thresholds) {
+    if (thresholdsInFlight.has(threshold.id)) continue;
+    await thresholdsUpsert({
+      id: threshold.id,
+      variant_id: threshold.variant_id,
+      location_id: threshold.location_id,
+      reorder_point: threshold.reorder_point,
+      reorder_quantity: threshold.reorder_quantity,
+      updated_at: threshold.updated_at,
     });
   }
 }

@@ -1048,6 +1048,273 @@ RSpec.describe "OfflineSync", type: :request do
     end
   end
 
+  describe "stock thresholds" do
+    def push!(token, commands)
+      post "/api/v1/sync/push", params: { device_id: "device-1", commands: commands },
+                                headers: auth_headers(token), as: :json
+      expect(response).to have_http_status(:ok)
+    end
+
+    def push_threshold!(token, key:, payload:, operation: "create")
+      push!(token, [{ idempotency_key: key, entity: "stock_threshold", operation: operation, payload: payload }])
+    end
+
+    # Every threshold needs a variant to hang off, and most need a location too.
+    def seed_catalog!(token, org_id)
+      ids = { product: SecureRandom.uuid, variant: SecureRandom.uuid, location: SecureRandom.uuid }
+      push!(token, [
+        { idempotency_key: "p-#{ids[:product]}", entity: "product", operation: "create", payload: { id: ids[:product], name: "Cola" } },
+        { idempotency_key: "v-#{ids[:variant]}", entity: "variant", operation: "create",
+          payload: { id: ids[:variant], product_id: ids[:product], sku: "COLA-#{ids[:variant][0, 8]}" } },
+        { idempotency_key: "l-#{ids[:location]}", entity: "location", operation: "create", payload: { id: ids[:location], name: "Main Shop" } }
+      ])
+      OfflineSync::ProcessPending.call(org_id: org_id)
+      ids
+    end
+
+    it "creates a threshold with the client's id and echoes it on the change feed" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+      ids = seed_catalog!(token, org_id)
+      threshold_id = SecureRandom.uuid
+
+      push_threshold!(token, key: "thr-1", payload: {
+        id: threshold_id, variant_id: ids[:variant], location_id: ids[:location],
+        reorder_point: "12.5", reorder_quantity: "50"
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      threshold = StockThreshold.find_by(org_id: org_id, id: threshold_id)
+      expect(threshold).to be_present
+      expect(threshold.reorder_point).to eq(12.5.to_d)
+      expect(threshold.reorder_quantity).to eq(50.to_d)
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      body = JSON.parse(response.body)
+      expect(body.fetch("acks")).to include(a_hash_including("idempotency_key" => "thr-1", "status" => "applied"))
+      expect(body.fetch("changes")).to include(
+        a_hash_including(
+          "entity" => "stock_threshold",
+          "entity_id" => threshold_id,
+          "metadata" => a_hash_including(
+            "record" => a_hash_including("variant_id" => ids[:variant], "location_id" => ids[:location], "reorder_point" => "12.5")
+          )
+        )
+      )
+    end
+
+    it "creates a variant-wide default when the command carries no location" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+      ids = seed_catalog!(token, org_id)
+
+      push_threshold!(token, key: "thr-1", payload: { variant_id: ids[:variant], reorder_point: "4" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      threshold = StockThreshold.find_by(org_id: org_id, variant_id: ids[:variant])
+      expect(threshold.location_id).to be_nil
+      expect(threshold.reorder_point).to eq(4.to_d)
+    end
+
+    it "lets the later command win when two devices set the same variant and location" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+      ids = seed_catalog!(token, org_id)
+
+      push_threshold!(token, key: "thr-a", payload: {
+        id: SecureRandom.uuid, variant_id: ids[:variant], location_id: ids[:location], reorder_point: "5"
+      })
+      push_threshold!(token, key: "thr-b", payload: {
+        id: SecureRandom.uuid, variant_id: ids[:variant], location_id: ids[:location], reorder_point: "9"
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      thresholds = StockThreshold.where(org_id: org_id, variant_id: ids[:variant])
+      expect(thresholds.count).to eq(1)
+      expect(thresholds.first.reorder_point).to eq(9.to_d)
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      body = JSON.parse(response.body)
+      expect(body.fetch("acks")).to include(a_hash_including("idempotency_key" => "thr-b", "status" => "applied"))
+    end
+
+    # The default row has location_id NULL, which Postgres counts as distinct in a unique index —
+    # without the partial index for that case every device would add another default.
+    it "does not create a second variant-wide default" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+      ids = seed_catalog!(token, org_id)
+
+      push_threshold!(token, key: "thr-a", payload: { id: SecureRandom.uuid, variant_id: ids[:variant], reorder_point: "5" })
+      push_threshold!(token, key: "thr-b", payload: { id: SecureRandom.uuid, variant_id: ids[:variant], reorder_point: "7" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(StockThreshold.where(org_id: org_id, variant_id: ids[:variant], location_id: nil).count).to eq(1)
+      expect(StockThreshold.find_by(org_id: org_id, variant_id: ids[:variant]).reorder_point).to eq(7.to_d)
+    end
+
+    it "keeps a per-location threshold and the variant-wide default side by side" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+      ids = seed_catalog!(token, org_id)
+
+      push_threshold!(token, key: "thr-default", payload: { variant_id: ids[:variant], reorder_point: "5" })
+      push_threshold!(token, key: "thr-shop", payload: { variant_id: ids[:variant], location_id: ids[:location], reorder_point: "20" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(StockThreshold.where(org_id: org_id, variant_id: ids[:variant]).count).to eq(2)
+      expect(
+        Inventory::LowStock.effective(org_id: org_id, variant_id: ids[:variant], location_id: ids[:location]).reorder_point
+      ).to eq(20.to_d)
+    end
+
+    it "updates only the fields the command carries" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+      ids = seed_catalog!(token, org_id)
+      threshold_id = SecureRandom.uuid
+
+      push_threshold!(token, key: "thr-1", payload: {
+        id: threshold_id, variant_id: ids[:variant], reorder_point: "5", reorder_quantity: "40"
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      push_threshold!(token, key: "thr-2", operation: "update", payload: { id: threshold_id, reorder_point: "8" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      threshold = StockThreshold.find_by(org_id: org_id, id: threshold_id)
+      expect(threshold.reorder_point).to eq(8.to_d)
+      expect(threshold.reorder_quantity).to eq(40.to_d)
+    end
+
+    it "clears the reorder quantity when the command sends it empty" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+      ids = seed_catalog!(token, org_id)
+      threshold_id = SecureRandom.uuid
+
+      push_threshold!(token, key: "thr-1", payload: {
+        id: threshold_id, variant_id: ids[:variant], reorder_point: "5", reorder_quantity: "40"
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      push_threshold!(token, key: "thr-2", operation: "update", payload: { id: threshold_id, reorder_quantity: nil })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(StockThreshold.find_by(org_id: org_id, id: threshold_id).reorder_quantity).to be_nil
+    end
+
+    it "deletes a threshold" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+      ids = seed_catalog!(token, org_id)
+      threshold_id = SecureRandom.uuid
+
+      push_threshold!(token, key: "thr-1", payload: { id: threshold_id, variant_id: ids[:variant], reorder_point: "5" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      push_threshold!(token, key: "thr-2", operation: "delete", payload: { id: threshold_id })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(StockThreshold.find_by(org_id: org_id, id: threshold_id)).to be_nil
+    end
+
+    it "fails bad input without writing a row" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+      ids = seed_catalog!(token, org_id)
+
+      push_threshold!(token, key: "thr-no-variant", payload: { reorder_point: "5" })
+      push_threshold!(token, key: "thr-alien-variant", payload: { variant_id: SecureRandom.uuid, reorder_point: "5" })
+      push_threshold!(token, key: "thr-alien-location", payload: {
+        variant_id: ids[:variant], location_id: SecureRandom.uuid, reorder_point: "5"
+      })
+      push_threshold!(token, key: "thr-nan", payload: { variant_id: ids[:variant], reorder_point: "soon" })
+      push_threshold!(token, key: "thr-negative", payload: { variant_id: ids[:variant], reorder_point: "-1" })
+      push_threshold!(token, key: "thr-no-point", payload: { variant_id: ids[:variant] })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(StockThreshold.where(org_id: org_id).count).to eq(0)
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      body = JSON.parse(response.body)
+      %w[thr-no-variant thr-alien-variant thr-alien-location thr-nan thr-negative thr-no-point].each do |key|
+        expect(body.fetch("acks")).to include(a_hash_including("idempotency_key" => key, "status" => "failed"))
+      end
+    end
+
+    it "does not create a duplicate when a command is reprocessed" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+      ids = seed_catalog!(token, org_id)
+
+      push_threshold!(token, key: "thr-1", payload: {
+        id: SecureRandom.uuid, variant_id: ids[:variant], location_id: ids[:location], reorder_point: "5"
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      # Simulates a crash between applying the command and marking it applied.
+      SyncOutbox.where(org_id: org_id, idempotency_key: "thr-1").update_all(status: "pending")
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(StockThreshold.where(org_id: org_id).count).to eq(1)
+      expect(SyncOutbox.find_by(org_id: org_id, idempotency_key: "thr-1").status).to eq("applied")
+    end
+
+    it "does not let one org edit another's threshold" do
+      org_a = create_org!
+      ids = seed_catalog!(org_a.fetch("access_token"), org_a.dig("organization", "id"))
+      threshold_id = SecureRandom.uuid
+      push_threshold!(org_a.fetch("access_token"), key: "thr-1", payload: {
+        id: threshold_id, variant_id: ids[:variant], reorder_point: "5"
+      })
+      OfflineSync::ProcessPending.call(org_id: org_a.dig("organization", "id"))
+
+      post "/api/v1/orgs", params: {
+        name: "Other Shop",
+        owner: { name: "Other", email: "other@example.com", password: "secret123" }
+      }, as: :json
+      org_b = JSON.parse(response.body)
+
+      push_threshold!(org_b.fetch("access_token"), key: "thr-2", operation: "update",
+                                                   payload: { id: threshold_id, reorder_point: "999" })
+      OfflineSync::ProcessPending.call(org_id: org_b.dig("organization", "id"))
+
+      expect(StockThreshold.find(threshold_id).reorder_point).to eq(5.to_d)
+      expect(StockThreshold.where(org_id: org_b.dig("organization", "id")).count).to eq(0)
+    end
+
+    # A threshold is configuration, not history: it must not become the reason a location that
+    # never held stock cannot be deleted.
+    it "does not block deleting a location that only has a threshold on it" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+      ids = seed_catalog!(token, org_id)
+
+      push_threshold!(token, key: "thr-1", payload: {
+        variant_id: ids[:variant], location_id: ids[:location], reorder_point: "5"
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      push!(token, [{ idempotency_key: "loc-del", entity: "location", operation: "delete", payload: { id: ids[:location] } }])
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(Location.find_by(org_id: org_id, id: ids[:location])).to be_nil
+      expect(StockThreshold.where(org_id: org_id).count).to eq(0)
+    end
+  end
+
   it "marks variant create as failed when missing sku" do
     org_body = create_org!
     token = org_body.fetch("access_token")

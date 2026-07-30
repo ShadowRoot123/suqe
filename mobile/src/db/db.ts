@@ -4,7 +4,7 @@ import { Platform } from "react-native";
 export type SqlDatabase = SQLiteDatabase;
 
 let dbPromise: Promise<SqlDatabase> | null = null;
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 export async function getDb(): Promise<SqlDatabase> {
   if (!dbPromise) dbPromise = openDatabaseAsync("myshop.db");
@@ -92,6 +92,20 @@ export async function migrate() {
     );
     await db.execAsync("CREATE INDEX IF NOT EXISTS idx_inv_movements_created ON inventory_movements (created_at DESC)");
     current = 6;
+    await db.execAsync(`PRAGMA user_version = ${current}`);
+  }
+
+  if (current < 7) {
+    // location_id NULL is the variant-wide default. Uniqueness per variant+location is enforced
+    // in thresholds.ts rather than here, because the web store has no indexes and a pull can
+    // legitimately hand us a row whose id replaces a local one aimed at the same target.
+    await db.execAsync(
+      "CREATE TABLE IF NOT EXISTS stock_thresholds (id TEXT PRIMARY KEY NOT NULL, variant_id TEXT NOT NULL, location_id TEXT, reorder_point TEXT NOT NULL, reorder_quantity TEXT, updated_at TEXT NOT NULL)"
+    );
+    await db.execAsync(
+      "CREATE INDEX IF NOT EXISTS idx_stock_thresholds_variant ON stock_thresholds (variant_id, location_id)"
+    );
+    current = 7;
     await db.execAsync(`PRAGMA user_version = ${current}`);
   }
 

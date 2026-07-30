@@ -6,6 +6,8 @@ export default function InventoryLayout() {
     <Stack screenOptions={{ headerTitleAlign: "center" }}>
       <Stack.Screen name="index" options={{ title: "Inventory" }} />
       <Stack.Screen name="adjustments" options={{ title: "Adjustments" }} />
+      <Stack.Screen name="thresholds" options={{ title: "Reorder points" }} />
+      <Stack.Screen name="movements" options={{ title: "Movement history" }} />
       <Stack.Screen name="locations/index" options={{ title: "Locations" }} />
       <Stack.Screen name="locations/create" options={{ title: "New location" }} />
       <Stack.Screen name="locations/[id]" options={{ title: "Edit location" }} />

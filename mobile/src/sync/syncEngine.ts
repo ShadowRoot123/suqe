@@ -10,6 +10,7 @@ import { formatQuantity, parseQuantity } from "@/inventory/lib/quantity";
 import { locationsDelete, locationsGetById, locationsUpsert } from "@/inventory/locations";
 import { movementsDelete, movementsUpsert } from "@/inventory/movements";
 import { snapshotsSet } from "@/inventory/snapshots";
+import { thresholdsDelete, thresholdsFindTarget, thresholdsUpsert } from "@/inventory/thresholds";
 import { getDeviceId } from "@/sync/device";
 import { makeIdempotencyKey } from "@/sync/idempotency";
 import { outboxListPending, outboxMarkStatusByIdempotencyKey } from "@/sync/outbox";
@@ -451,6 +452,61 @@ export async function createInventoryAdjustmentOffline(args: {
   return id;
 }
 
+/**
+ * Sets the reorder point for a variant at one location, or for the variant everywhere when
+ * `location_id` is null. One entry point rather than create/update, because "there is already a
+ * row for this target" is an implementation detail the caller should not have to look up — and
+ * the server resolves a duplicate create onto the existing row anyway.
+ */
+export async function setStockThresholdOffline(args: {
+  variant_id: string;
+  location_id?: string | null;
+  reorder_point: number | string;
+  reorder_quantity?: number | string | null;
+}) {
+  const point = parseQuantity(args.reorder_point);
+  if (point === null) throw new Error("Reorder point must be a number");
+  if (point < 0) throw new Error("Reorder point must not be negative");
+
+  const rawQuantity = args.reorder_quantity;
+  const hasQuantity = rawQuantity !== null && rawQuantity !== undefined && String(rawQuantity).trim() !== "";
+  const quantity = hasQuantity ? parseQuantity(rawQuantity) : null;
+  if (hasQuantity && quantity === null) throw new Error("Reorder quantity must be a number");
+  if (quantity !== null && quantity <= 0) throw new Error("Reorder quantity must be greater than zero");
+
+  const location_id = args.location_id ?? null;
+  const reorder_point = formatQuantity(point);
+  const reorder_quantity = quantity === null ? null : formatQuantity(quantity);
+  const now = new Date().toISOString();
+
+  const existing = await thresholdsFindTarget(args.variant_id, location_id);
+  const id = existing?.id ?? makeUuid();
+
+  await thresholdsUpsert({ id, variant_id: args.variant_id, location_id, reorder_point, reorder_quantity, updated_at: now });
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("thr"),
+    entity: "stock_threshold",
+    operation: existing ? "update" : "create",
+    // An update carries reorder_quantity even when null: the server only touches the keys the
+    // command names, so omitting it would leave a stale quantity behind instead of clearing it.
+    payload: existing
+      ? { id, reorder_point, reorder_quantity }
+      : { id, variant_id: args.variant_id, location_id, reorder_point, reorder_quantity },
+  });
+
+  return id;
+}
+
+export async function deleteStockThresholdOffline(id: string) {
+  await thresholdsDelete(id);
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("thr"),
+    entity: "stock_threshold",
+    operation: "delete",
+    payload: { id },
+  });
+}
+
 async function applyChanges(changes: SyncPullChange[]) {
   for (const change of changes) {
     const operation = String((change.metadata as any)?.operation ?? "");
@@ -463,6 +519,11 @@ async function applyChanges(changes: SyncPullChange[]) {
       // instead of leaving it pending forever and inflating on-hand.
       if (change.entity === "inventory_adjustment" && operation === "create") {
         await movementsDelete(id);
+      }
+      // Same reasoning for a refused reorder point: nothing was configured on the server, so
+      // leaving the row would show a low-stock badge no other device agrees with.
+      if (change.entity === "stock_threshold" && operation === "create") {
+        await thresholdsDelete(id);
       }
       continue;
     }
@@ -558,6 +619,27 @@ async function applyChanges(changes: SyncPullChange[]) {
         name,
         type: record?.type ? String(record.type) : "shop",
         address: record?.address ? String(record.address) : null,
+        updated_at: change.created_at,
+      });
+      continue;
+    }
+
+    if (change.entity === "stock_threshold") {
+      if (operation === "delete") {
+        await thresholdsDelete(id);
+        continue;
+      }
+      const variant_id = String(record?.variant_id ?? "");
+      // A delete carries only an id, and so does an update the server no-opped; without a
+      // variant there is nothing to key the row on, and the local copy is already correct.
+      if (!variant_id) continue;
+
+      await thresholdsUpsert({
+        id,
+        variant_id,
+        location_id: record?.location_id ? String(record.location_id) : null,
+        reorder_point: record?.reorder_point ?? "0",
+        reorder_quantity: record?.reorder_quantity ?? null,
         updated_at: change.created_at,
       });
       continue;

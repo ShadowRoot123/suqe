@@ -81,6 +81,10 @@ module OfflineSync
         return apply_location(item)
       end
 
+      if item.entity == "stock_threshold"
+        return apply_stock_threshold(item)
+      end
+
       { status: "applied", entity_id: nil, record: nil, error: nil }
     rescue StandardError => e
       { status: "failed", entity_id: nil, record: nil, error: e.message }
@@ -570,6 +574,103 @@ module OfflineSync
       }
     rescue StandardError => e
       { status: "failed", entity_id: fetch_key(payload, :id), record: payload, error: e.message }
+    end
+
+    # A reorder point is configuration, not ledger history, so unlike an adjustment it can be
+    # changed and removed. A row without a location_id is the variant-wide default.
+    def apply_stock_threshold(item)
+      payload = normalize_hash(item.payload)
+      org_id = item.org_id
+
+      case item.operation
+      when "create"
+        requested_id = fetch_key(payload, :id).presence
+        variant_id = fetch_key(payload, :variant_id).presence
+        location_id = fetch_key(payload, :location_id).presence
+        reorder_point = parse_threshold_decimal(fetch_key(payload, :reorder_point), field: "reorder_point")
+        reorder_quantity = parse_threshold_decimal(fetch_key(payload, :reorder_quantity), field: "reorder_quantity")
+
+        raise ArgumentError, "Missing field: variant_id" if variant_id.blank?
+        raise ArgumentError, "Missing field: reorder_point" if reorder_point.nil?
+        raise ArgumentError, "Invalid variant" unless Variant.where(org_id: org_id, id: variant_id).exists?
+        if location_id.present? && !Location.where(org_id: org_id, id: location_id).exists?
+          raise ArgumentError, "Invalid location"
+        end
+
+        threshold =
+          begin
+            with_savepoint do
+              StockThreshold.create!(
+                { id: requested_id, org_id: org_id, variant_id: variant_id, location_id: location_id,
+                  reorder_point: reorder_point, reorder_quantity: reorder_quantity }.compact
+              )
+            end
+          rescue ActiveRecord::RecordNotUnique
+            # Two devices set a reorder point for the same variant and location. Unlike a name
+            # collision the key matches but the value may not, so the command that arrives later
+            # wins instead of being silently dropped. A replay re-applies identical values.
+            existing = StockThreshold.find_by!(org_id: org_id, variant_id: variant_id, location_id: location_id)
+            existing.update!(reorder_point: reorder_point, reorder_quantity: reorder_quantity)
+            existing
+          end
+
+        return { status: "applied", entity_id: threshold.id, record: threshold_record(threshold), error: nil }
+      when "update"
+        threshold_id = fetch_key(payload, :id).presence
+        raise ArgumentError, "Missing field: id" if threshold_id.blank?
+
+        threshold = StockThreshold.find_by(org_id: org_id, id: threshold_id)
+        return { status: "applied", entity_id: threshold_id, record: { id: threshold_id }, error: nil } if threshold.blank?
+
+        updates = {}
+        if payload.key?("reorder_point") || payload.key?(:reorder_point)
+          point = parse_threshold_decimal(fetch_key(payload, :reorder_point), field: "reorder_point")
+          raise ArgumentError, "Missing field: reorder_point" if point.nil?
+
+          updates[:reorder_point] = point
+        end
+        if payload.key?("reorder_quantity") || payload.key?(:reorder_quantity)
+          updates[:reorder_quantity] = parse_threshold_decimal(fetch_key(payload, :reorder_quantity), field: "reorder_quantity")
+        end
+        threshold.update!(updates) if updates.any?
+
+        return { status: "applied", entity_id: threshold.id, record: threshold_record(threshold), error: nil }
+      when "delete"
+        threshold_id = fetch_key(payload, :id).presence
+        raise ArgumentError, "Missing field: id" if threshold_id.blank?
+
+        threshold = StockThreshold.find_by(org_id: org_id, id: threshold_id)
+        threshold&.destroy!
+
+        return { status: "applied", entity_id: threshold_id, record: { id: threshold_id }, error: nil }
+      end
+
+      { status: "failed", entity_id: nil, record: nil, error: "Unsupported operation: #{item.operation}" }
+    rescue StandardError => e
+      { status: "failed", entity_id: fetch_key(payload, :id), record: payload, error: e.message }
+    end
+
+    def threshold_record(threshold)
+      {
+        id: threshold.id,
+        variant_id: threshold.variant_id,
+        location_id: threshold.location_id,
+        # decimals as strings so the client's JSON parse cannot round them
+        reorder_point: threshold.reorder_point.to_s,
+        reorder_quantity: threshold.reorder_quantity&.to_s
+      }
+    end
+
+    # Quantities arrive as strings from the client's SQLite; a bad one has to fail the command
+    # with a readable message rather than reach the numeric column as a StatementInvalid.
+    def parse_threshold_decimal(value, field:)
+      return nil if value.nil? || value.to_s.strip.empty?
+
+      begin
+        BigDecimal(value.to_s.strip)
+      rescue ArgumentError, TypeError
+        raise ArgumentError, "#{field} must be a number"
+      end
     end
 
     # Commands carry no session, so the client tells us who acted; ignore anyone outside the org.

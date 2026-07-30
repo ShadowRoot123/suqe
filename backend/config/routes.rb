@@ -34,6 +34,9 @@ Rails.application.routes.draw do
 
       resources :inventory_snapshots, only: %i[index]
       resources :inventory_movements, only: %i[index show create]
+      resources :stock_thresholds, only: %i[index] do
+        get :low_stock, on: :collection
+      end
 
       resources :purchase_orders, only: %i[index show create update destroy] do
         resources :purchase_items, only: %i[index create update destroy]

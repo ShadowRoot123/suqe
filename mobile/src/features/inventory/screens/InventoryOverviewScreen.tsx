@@ -11,13 +11,14 @@ import { useInventoryData, type OnHandLine } from "../hooks/useInventoryData";
 
 export default function InventoryOverviewScreen() {
   const bp = useBreakpoint();
-  const { refreshing, refresh, lines, locations } = useInventoryData();
+  const { refreshing, refresh, lines, locations, lowStockCount } = useInventoryData();
 
   const table = useTableState(lines, {
     getSearchText: (l) => `${l.product_name} ${l.variant.sku} ${l.variant.barcode ?? ""} ${l.location_name}`,
     filterFns: {
       location: (l, value) => (typeof value === "string" ? l.location_id === value : true),
       pending: (l, value) => (value === "pending" ? l.pending !== 0 : true),
+      low: (l, value) => (value === "low" ? !!l.lowStock?.low : true),
     },
     sortValueBy: {
       product: (l) => l.product_name,
@@ -36,10 +37,25 @@ export default function InventoryOverviewScreen() {
   return (
     <Screen scroll refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} />}>
       <Stack gap={16}>
-        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <AppText variant="h1">Inventory</AppText>
-          <Button title="Adjust stock" onPress={() => router.push("/(tabs)/inventory/adjustments")} />
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <Button title="History" variant="ghost" onPress={() => router.push("/(tabs)/inventory/movements")} />
+            <Button title="Reorder points" variant="ghost" onPress={() => router.push("/(tabs)/inventory/thresholds")} />
+            <Button title="Adjust stock" onPress={() => router.push("/(tabs)/inventory/adjustments")} />
+          </View>
         </View>
+
+        {lowStockCount > 0 ? (
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <Badge tone="danger" label="Low stock" />
+            <AppText muted>
+              {lowStockCount === 1
+                ? "1 line is at or below its reorder point."
+                : `${lowStockCount} lines are at or below their reorder point.`}
+            </AppText>
+          </View>
+        ) : null}
 
         {pendingCount > 0 ? (
           <AppText muted>
@@ -56,6 +72,11 @@ export default function InventoryOverviewScreen() {
           }}
         >
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10 }}>
+            <Chip
+              label="Low stock"
+              selected={table.state.filters.low === "low"}
+              onPress={() => table.setFilter("low", table.state.filters.low === "low" ? null : "low")}
+            />
             <Chip
               label="Not synced"
               selected={table.state.filters.pending === "pending"}
@@ -100,9 +121,23 @@ export default function InventoryOverviewScreen() {
               {
                 key: "quantity",
                 title: "On hand",
-                minWidth: 140,
-                render: (l: OnHandLine) => formatQuantity(l.quantity),
+                minWidth: 180,
+                render: (l: OnHandLine) => (
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <AppText>{formatQuantity(l.quantity)}</AppText>
+                    {l.lowStock?.low ? <Badge tone="danger" label="Low" /> : null}
+                  </View>
+                ),
                 sortValue: (l: OnHandLine) => l.quantity,
+              },
+              {
+                key: "reorder",
+                title: "Reorder point",
+                minWidth: 150,
+                hideOnMobile: true,
+                // An unset reorder point is not zero: nobody asked to be told about this line.
+                render: (l: OnHandLine) => (l.lowStock ? formatQuantity(l.lowStock.reorder_point) : "—"),
+                sortValue: (l: OnHandLine) => l.lowStock?.reorder_point ?? -1,
               },
               {
                 key: "pending",

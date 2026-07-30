@@ -120,11 +120,61 @@ export type InventorySnapshot = {
   updated_at: string;
 };
 
+export type StockThreshold = {
+  id: string;
+  org_id: string;
+  variant_id: string;
+  /** null is the variant-wide default. */
+  location_id: string | null;
+  reorder_point: string;
+  reorder_quantity: string | null;
+  updated_at: string;
+};
+
+export type LowStockRow = {
+  variant_id: string;
+  location_id: string;
+  on_hand: string;
+  reorder_point: string;
+  reorder_quantity: string | null;
+  shortfall: string;
+};
+
+export type InventoryMovement = {
+  id: string;
+  org_id: string;
+  variant_id: string;
+  location_id: string;
+  type: string;
+  quantity_delta: string;
+  reference_type: string | null;
+  reference_id: string | null;
+  note: string | null;
+  created_by: string | null;
+  created_at: string;
+  idempotency_key: string | null;
+};
+
 export type CategoriesIndexResponse = { categories: Category[] };
 export type ProductsIndexResponse = { products: Product[] };
 export type VariantsIndexResponse = { variants: Variant[] };
 export type LocationsIndexResponse = { locations: Location[] };
 export type InventorySnapshotsIndexResponse = { inventory_snapshots: InventorySnapshot[] };
+export type StockThresholdsIndexResponse = { stock_thresholds: StockThreshold[] };
+export type LowStockIndexResponse = { low_stock: LowStockRow[] };
+/** `next_cursor` is null on the last page — the keyset cursor, not an offset. */
+export type InventoryMovementsIndexResponse = { inventory_movements: InventoryMovement[]; next_cursor: string | null };
+
+export type InventoryMovementsQuery = {
+  variant_id?: string | null;
+  location_id?: string | null;
+  type?: string | null;
+  created_by?: string | null;
+  from?: string | null;
+  to?: string | null;
+  limit?: number | null;
+  cursor?: string | null;
+};
 
 export function apiForSession(session: Session | null) {
   const client = createApiClient({ getAccessToken: () => session?.accessToken ?? null });
@@ -153,5 +203,26 @@ export function apiForSession(session: Session | null) {
     locationsIndex: () => client.request<LocationsIndexResponse>({ path: "/locations" }).then((r) => r.data),
     inventorySnapshotsIndex: () =>
       client.request<InventorySnapshotsIndexResponse>({ path: "/inventory_snapshots" }).then((r) => r.data),
+    stockThresholdsIndex: () =>
+      client.request<StockThresholdsIndexResponse>({ path: "/stock_thresholds" }).then((r) => r.data),
+    lowStockIndex: (args?: { location_id?: string | null }) => {
+      const params = new URLSearchParams();
+      if (args?.location_id) params.set("location_id", args.location_id);
+      const query = params.toString();
+      return client
+        .request<LowStockIndexResponse>({ path: query ? `/stock_thresholds/low_stock?${query}` : "/stock_thresholds/low_stock" })
+        .then((r) => r.data);
+    },
+    inventoryMovementsIndex: (args?: InventoryMovementsQuery) => {
+      const params = new URLSearchParams();
+      for (const [key, value] of Object.entries(args ?? {})) {
+        if (value === null || value === undefined || value === "") continue;
+        params.set(key, String(value));
+      }
+      const query = params.toString();
+      return client
+        .request<InventoryMovementsIndexResponse>({ path: query ? `/inventory_movements?${query}` : "/inventory_movements" })
+        .then((r) => r.data);
+    },
   };
 }
