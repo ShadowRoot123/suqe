@@ -1315,6 +1315,493 @@ RSpec.describe "OfflineSync", type: :request do
     end
   end
 
+  describe "suppliers" do
+    def push!(token, commands)
+      post "/api/v1/sync/push", params: { device_id: "device-1", commands: commands },
+                                headers: auth_headers(token), as: :json
+      expect(response).to have_http_status(:ok)
+    end
+
+    def push_supplier!(token, key:, payload:, operation: "create")
+      push!(token, [{ idempotency_key: key, entity: "supplier", operation: operation, payload: payload }])
+    end
+
+    it "creates a supplier with the client's id and echoes it on the change feed" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+      supplier_id = SecureRandom.uuid
+
+      push_supplier!(token, key: "sup-1", payload: {
+        id: supplier_id, name: "Acme Supply", phone: "+123", email: "sales@acme.test", address: "1 Dock Road"
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      supplier = Supplier.find_by(org_id: org_id, id: supplier_id)
+      expect(supplier).to be_present
+      expect(supplier.name).to eq("Acme Supply")
+      expect(supplier.email).to eq("sales@acme.test")
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      body = JSON.parse(response.body)
+      expect(body.fetch("acks")).to include(a_hash_including("idempotency_key" => "sup-1", "status" => "applied"))
+      expect(body.fetch("changes")).to include(
+        a_hash_including(
+          "entity" => "supplier",
+          "entity_id" => supplier_id,
+          "metadata" => a_hash_including("record" => a_hash_including("name" => "Acme Supply", "phone" => "+123"))
+        )
+      )
+    end
+
+    # Two devices adding the same supplier while offline is the same collision a duplicate
+    # category name is: the org wanted a supplier by that name and now has exactly one.
+    it "resolves two devices adding the same supplier onto one row" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+
+      push_supplier!(token, key: "sup-a", payload: { id: SecureRandom.uuid, name: "Acme Supply" })
+      push_supplier!(token, key: "sup-b", payload: { id: SecureRandom.uuid, name: "Acme Supply" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(Supplier.where(org_id: org_id, name: "Acme Supply").count).to eq(1)
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      acks = JSON.parse(response.body).fetch("acks")
+      expect(acks).to include(a_hash_including("idempotency_key" => "sup-a", "status" => "applied"))
+      expect(acks).to include(a_hash_including("idempotency_key" => "sup-b", "status" => "applied"))
+    end
+
+    it "updates only the fields the command carries and can clear a contact detail" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+      supplier_id = SecureRandom.uuid
+
+      push_supplier!(token, key: "sup-1", payload: { id: supplier_id, name: "Acme", phone: "+123", email: "a@b.test" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      push_supplier!(token, key: "sup-2", operation: "update", payload: { id: supplier_id, name: "Acme Inc", phone: "" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      supplier = Supplier.find_by(org_id: org_id, id: supplier_id)
+      expect(supplier.name).to eq("Acme Inc")
+      expect(supplier.phone).to be_nil
+      expect(supplier.email).to eq("a@b.test")
+    end
+
+    it "fails a create with no name and an update that blanks it" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+      supplier_id = SecureRandom.uuid
+
+      push_supplier!(token, key: "sup-1", payload: { id: supplier_id, name: "Acme" })
+      push_supplier!(token, key: "sup-bad", payload: { id: SecureRandom.uuid, name: "  " })
+      push_supplier!(token, key: "sup-blank", operation: "update", payload: { id: supplier_id, name: "" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      acks = JSON.parse(response.body).fetch("acks")
+      expect(acks).to include(a_hash_including("idempotency_key" => "sup-bad", "status" => "failed"))
+      expect(acks).to include(a_hash_including("idempotency_key" => "sup-blank", "status" => "failed"))
+      expect(Supplier.find_by(org_id: org_id, id: supplier_id).name).to eq("Acme")
+    end
+
+    it "deletes a supplier nothing has been ordered from" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+      supplier_id = SecureRandom.uuid
+
+      push_supplier!(token, key: "sup-1", payload: { id: supplier_id, name: "Acme" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      push_supplier!(token, key: "sup-del", operation: "delete", payload: { id: supplier_id })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(Supplier.find_by(org_id: org_id, id: supplier_id)).to be_nil
+    end
+
+    # purchase_orders.supplier_id is ON DELETE RESTRICT, and Postgres raises restrict_violation
+    # (23001) — which Rails does not map to InvalidForeignKey — so without the savepoint and the
+    # cause check the device got a raw PG dump instead of a readable failure.
+    it "refuses to delete a supplier the org has ordered from" do
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+      supplier_id = SecureRandom.uuid
+
+      push_supplier!(token, key: "sup-1", payload: { id: supplier_id, name: "Acme" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+      location = Location.create!(org_id: org_id, name: "Shop", type: "shop")
+      Purchasing::CreateOrder.call(org_id: org_id, supplier_id: supplier_id, location_id: location.id)
+
+      push_supplier!(token, key: "sup-del", operation: "delete", payload: { id: supplier_id })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(Supplier.find_by(org_id: org_id, id: supplier_id)).to be_present
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      body = JSON.parse(response.body)
+      expect(body.fetch("acks")).to include(a_hash_including("idempotency_key" => "sup-del", "status" => "failed"))
+      expect(body.fetch("changes")).to include(
+        a_hash_including(
+          "entity" => "supplier",
+          "metadata" => a_hash_including("error" => "Supplier has purchase orders and cannot be deleted")
+        )
+      )
+    end
+
+    it "does not touch another org's supplier" do
+      org_a = create_org!
+      supplier_id = SecureRandom.uuid
+      push_supplier!(org_a.fetch("access_token"), key: "sup-1", payload: { id: supplier_id, name: "Acme" })
+      OfflineSync::ProcessPending.call(org_id: org_a.dig("organization", "id"))
+
+      post "/api/v1/orgs", params: {
+        name: "Other Shop",
+        owner: { name: "Other", email: "other@example.com", password: "secret123" }
+      }, as: :json
+      org_b = JSON.parse(response.body)
+
+      push_supplier!(org_b.fetch("access_token"), key: "sup-x", operation: "update",
+                                                  payload: { id: supplier_id, name: "Hijacked" })
+      OfflineSync::ProcessPending.call(org_id: org_b.dig("organization", "id"))
+
+      expect(Supplier.find(supplier_id).name).to eq("Acme")
+      expect(Supplier.where(org_id: org_b.dig("organization", "id")).count).to eq(0)
+    end
+  end
+
+  describe "purchase orders" do
+    def push!(token, commands)
+      post "/api/v1/sync/push", params: { device_id: "device-1", commands: commands },
+                                headers: auth_headers(token), as: :json
+      expect(response).to have_http_status(:ok)
+    end
+
+    def push_order!(token, key:, payload:, operation: "create")
+      push!(token, [{ idempotency_key: key, entity: "purchase_order", operation: operation, payload: payload }])
+    end
+
+    # An order needs a supplier to buy from, a location to deliver to, and a variant to order.
+    def seed_purchasing!(token, org_id)
+      ids = {
+        supplier: SecureRandom.uuid, location: SecureRandom.uuid,
+        product: SecureRandom.uuid, variant: SecureRandom.uuid, other_variant: SecureRandom.uuid
+      }
+      push!(token, [
+        { idempotency_key: "s-#{ids[:supplier]}", entity: "supplier", operation: "create",
+          payload: { id: ids[:supplier], name: "Acme Supply" } },
+        { idempotency_key: "l-#{ids[:location]}", entity: "location", operation: "create",
+          payload: { id: ids[:location], name: "Main Shop" } },
+        { idempotency_key: "p-#{ids[:product]}", entity: "product", operation: "create",
+          payload: { id: ids[:product], name: "Cola" } },
+        { idempotency_key: "v-#{ids[:variant]}", entity: "variant", operation: "create",
+          payload: { id: ids[:variant], product_id: ids[:product], sku: "COLA-#{ids[:variant][0, 8]}" } },
+        { idempotency_key: "v2-#{ids[:other_variant]}", entity: "variant", operation: "create",
+          payload: { id: ids[:other_variant], product_id: ids[:product], sku: "FANTA-#{ids[:other_variant][0, 8]}" } }
+      ])
+      OfflineSync::ProcessPending.call(org_id: org_id)
+      ids
+    end
+
+    def start!
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+      [token, org_id, seed_purchasing!(token, org_id)]
+    end
+
+    it "creates a draft order with its lines under the client's ids and echoes them on the feed" do
+      token, org_id, ids = start!
+      order_id = SecureRandom.uuid
+      line_id = SecureRandom.uuid
+
+      push_order!(token, key: "po-1", payload: {
+        id: order_id, supplier_id: ids[:supplier], location_id: ids[:location],
+        status: "draft", expected_at: "2026-08-20T09:00:00Z",
+        items: [{ id: line_id, variant_id: ids[:variant], quantity_ordered: "12", unit_cost: "2.50" }]
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      order = PurchaseOrder.find_by(org_id: org_id, id: order_id)
+      expect(order).to be_present
+      expect(order.status).to eq("draft")
+      expect(order.total_cost).to eq(30.to_d)
+      expect(order.expected_at).to be_present
+      expect(order.purchase_items.map(&:id)).to eq([line_id])
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      body = JSON.parse(response.body)
+      expect(body.fetch("acks")).to include(a_hash_including("idempotency_key" => "po-1", "status" => "applied"))
+      expect(body.fetch("changes")).to include(
+        a_hash_including(
+          "entity" => "purchase_order",
+          "entity_id" => order_id,
+          "metadata" => a_hash_including(
+            "record" => a_hash_including(
+              "status" => "draft",
+              "total_cost" => "30.0",
+              "items" => [a_hash_including("id" => line_id, "quantity_ordered" => "12.0", "unit_cost" => "2.5")]
+            )
+          )
+        )
+      )
+    end
+
+    it "replays a create without duplicating the order or its lines" do
+      token, org_id, ids = start!
+      order_id = SecureRandom.uuid
+      payload = {
+        id: order_id, supplier_id: ids[:supplier], location_id: ids[:location],
+        items: [{ variant_id: ids[:variant], quantity_ordered: "1", unit_cost: "1" }]
+      }
+
+      push_order!(token, key: "po-1", payload: payload)
+      OfflineSync::ProcessPending.call(org_id: org_id)
+      # A different key so push does not dedupe it: this is the handler's own replay guard.
+      push_order!(token, key: "po-1-again", payload: payload)
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(PurchaseOrder.where(org_id: org_id, id: order_id).count).to eq(1)
+      expect(PurchaseItem.where(purchase_order_id: order_id).count).to eq(1)
+    end
+
+    it "edits a draft's lines and recomputes the total" do
+      token, org_id, ids = start!
+      order_id = SecureRandom.uuid
+      line_id = SecureRandom.uuid
+
+      push_order!(token, key: "po-1", payload: {
+        id: order_id, supplier_id: ids[:supplier], location_id: ids[:location],
+        items: [{ id: line_id, variant_id: ids[:variant], quantity_ordered: "2", unit_cost: "5" }]
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      push_order!(token, key: "po-2", operation: "update", payload: {
+        id: order_id,
+        items: [
+          { id: line_id, variant_id: ids[:variant], quantity_ordered: "3", unit_cost: "5" },
+          { variant_id: ids[:other_variant], quantity_ordered: "1", unit_cost: "4" }
+        ]
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      order = PurchaseOrder.find_by(org_id: org_id, id: order_id)
+      expect(order.total_cost).to eq(19.to_d)
+      expect(order.purchase_items.count).to eq(2)
+      expect(order.purchase_items.find_by(id: line_id).quantity_ordered).to eq(3.to_d)
+    end
+
+    # One user action, queued offline as one command: the lines are final and the order goes out.
+    it "applies line edits and the approval in a single command" do
+      token, org_id, ids = start!
+      order_id = SecureRandom.uuid
+
+      push_order!(token, key: "po-1", payload: {
+        id: order_id, supplier_id: ids[:supplier], location_id: ids[:location]
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      push_order!(token, key: "po-2", operation: "update", payload: {
+        id: order_id,
+        status: "approved",
+        items: [{ variant_id: ids[:variant], quantity_ordered: "6", unit_cost: "1.25" }]
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      order = PurchaseOrder.find_by(org_id: org_id, id: order_id)
+      expect(order.status).to eq("approved")
+      expect(order.total_cost).to eq("7.50".to_d)
+    end
+
+    it "refuses to edit the lines of an approved order and leaves them intact" do
+      token, org_id, ids = start!
+      order_id = SecureRandom.uuid
+
+      push_order!(token, key: "po-1", payload: {
+        id: order_id, supplier_id: ids[:supplier], location_id: ids[:location],
+        items: [{ variant_id: ids[:variant], quantity_ordered: "2", unit_cost: "5" }]
+      })
+      push_order!(token, key: "po-approve", operation: "update", payload: { id: order_id, status: "approved" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      push_order!(token, key: "po-edit", operation: "update", payload: {
+        id: order_id, items: [{ variant_id: ids[:variant], quantity_ordered: "99", unit_cost: "5" }]
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      order = PurchaseOrder.find_by(org_id: org_id, id: order_id)
+      expect(order.purchase_items.first.quantity_ordered).to eq(2.to_d)
+      expect(order.total_cost).to eq(10.to_d)
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      body = JSON.parse(response.body)
+      expect(body.fetch("acks")).to include(a_hash_including("idempotency_key" => "po-edit", "status" => "failed"))
+      expect(body.fetch("changes")).to include(
+        a_hash_including(
+          "entity" => "purchase_order",
+          "metadata" => a_hash_including("error" => "Cannot edit a purchase order that is approved")
+        )
+      )
+    end
+
+    it "fails an illegal transition and leaves the status alone" do
+      token, org_id, ids = start!
+      order_id = SecureRandom.uuid
+
+      push_order!(token, key: "po-1", payload: {
+        id: order_id, supplier_id: ids[:supplier], location_id: ids[:location],
+        items: [{ variant_id: ids[:variant], quantity_ordered: "1", unit_cost: "1" }]
+      })
+      push_order!(token, key: "po-receive", operation: "update", payload: { id: order_id, status: "received" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(PurchaseOrder.find_by(org_id: org_id, id: order_id).status).to eq("draft")
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      expect(JSON.parse(response.body).fetch("acks"))
+        .to include(a_hash_including("idempotency_key" => "po-receive", "status" => "failed"))
+    end
+
+    it "fails an approval of an order with no lines" do
+      token, org_id, ids = start!
+      order_id = SecureRandom.uuid
+
+      push_order!(token, key: "po-1", payload: {
+        id: order_id, supplier_id: ids[:supplier], location_id: ids[:location]
+      })
+      push_order!(token, key: "po-approve", operation: "update", payload: { id: order_id, status: "approved" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(PurchaseOrder.find_by(org_id: org_id, id: order_id).status).to eq("draft")
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      body = JSON.parse(response.body)
+      expect(body.fetch("changes")).to include(
+        a_hash_including(
+          "entity" => "purchase_order",
+          "metadata" => a_hash_including("error" => a_string_matching(/at least one line/))
+        )
+      )
+    end
+
+    it "fails a create whose supplier, location or variant is not in the org" do
+      token, org_id, ids = start!
+
+      push_order!(token, key: "po-supplier", payload: {
+        id: SecureRandom.uuid, supplier_id: SecureRandom.uuid, location_id: ids[:location]
+      })
+      push_order!(token, key: "po-location", payload: {
+        id: SecureRandom.uuid, supplier_id: ids[:supplier], location_id: SecureRandom.uuid
+      })
+      push_order!(token, key: "po-variant", payload: {
+        id: SecureRandom.uuid, supplier_id: ids[:supplier], location_id: ids[:location],
+        items: [{ variant_id: SecureRandom.uuid, quantity_ordered: "1", unit_cost: "1" }]
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(PurchaseOrder.where(org_id: org_id).count).to eq(0)
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      acks = JSON.parse(response.body).fetch("acks")
+      %w[po-supplier po-location po-variant].each do |key|
+        expect(acks).to include(a_hash_including("idempotency_key" => key, "status" => "failed"))
+      end
+    end
+
+    # A datetime column casts garbage to nil, which would quietly drop the delivery date. Prose
+    # has to fail too: Time.zone.parse would pull "tue" out of this and invent a real date.
+    it "fails a create carrying an unparseable expected_at" do
+      token, org_id, ids = start!
+
+      push_order!(token, key: "po-date", payload: {
+        id: SecureRandom.uuid, supplier_id: ids[:supplier], location_id: ids[:location],
+        expected_at: "next tuesday-ish"
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(PurchaseOrder.where(org_id: org_id).count).to eq(0)
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      expect(JSON.parse(response.body).fetch("changes")).to include(
+        a_hash_including("metadata" => a_hash_including("error" => "expected_at must be an ISO 8601 date"))
+      )
+    end
+
+    it "accepts an expected_at with no time of day" do
+      token, org_id, ids = start!
+      order_id = SecureRandom.uuid
+
+      push_order!(token, key: "po-date-only", payload: {
+        id: order_id, supplier_id: ids[:supplier], location_id: ids[:location], expected_at: "2026-08-20"
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(PurchaseOrder.find_by(org_id: org_id, id: order_id).expected_at).to be_present
+    end
+
+    it "deletes a draft order and refuses to delete one that has been approved" do
+      token, org_id, ids = start!
+      draft_id = SecureRandom.uuid
+      approved_id = SecureRandom.uuid
+
+      push!(token, [
+        { idempotency_key: "po-draft", entity: "purchase_order", operation: "create",
+          payload: { id: draft_id, supplier_id: ids[:supplier], location_id: ids[:location],
+                     items: [{ variant_id: ids[:variant], quantity_ordered: "1", unit_cost: "1" }] } },
+        { idempotency_key: "po-approved", entity: "purchase_order", operation: "create",
+          payload: { id: approved_id, supplier_id: ids[:supplier], location_id: ids[:location],
+                     items: [{ variant_id: ids[:variant], quantity_ordered: "1", unit_cost: "1" }] } },
+        { idempotency_key: "po-approve", entity: "purchase_order", operation: "update",
+          payload: { id: approved_id, status: "approved" } }
+      ])
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      push!(token, [
+        { idempotency_key: "po-del-draft", entity: "purchase_order", operation: "delete", payload: { id: draft_id } },
+        { idempotency_key: "po-del-approved", entity: "purchase_order", operation: "delete", payload: { id: approved_id } }
+      ])
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(PurchaseOrder.find_by(org_id: org_id, id: draft_id)).to be_nil
+      # The lines go with it; nothing else points at a draft.
+      expect(PurchaseItem.where(purchase_order_id: draft_id).count).to eq(0)
+      expect(PurchaseOrder.find_by(org_id: org_id, id: approved_id)).to be_present
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      acks = JSON.parse(response.body).fetch("acks")
+      expect(acks).to include(a_hash_including("idempotency_key" => "po-del-draft", "status" => "applied"))
+      expect(acks).to include(a_hash_including("idempotency_key" => "po-del-approved", "status" => "failed"))
+    end
+
+    it "does not touch another org's order" do
+      token, org_id, ids = start!
+      order_id = SecureRandom.uuid
+      push_order!(token, key: "po-1", payload: {
+        id: order_id, supplier_id: ids[:supplier], location_id: ids[:location],
+        items: [{ variant_id: ids[:variant], quantity_ordered: "1", unit_cost: "1" }]
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      post "/api/v1/orgs", params: {
+        name: "Other Shop",
+        owner: { name: "Other", email: "other@example.com", password: "secret123" }
+      }, as: :json
+      org_b = JSON.parse(response.body)
+
+      push_order!(org_b.fetch("access_token"), key: "po-x", operation: "update",
+                                               payload: { id: order_id, status: "cancelled" })
+      OfflineSync::ProcessPending.call(org_id: org_b.dig("organization", "id"))
+
+      expect(PurchaseOrder.find(order_id).status).to eq("draft")
+      expect(PurchaseOrder.where(org_id: org_b.dig("organization", "id")).count).to eq(0)
+    end
+  end
+
   it "marks variant create as failed when missing sku" do
     org_body = create_org!
     token = org_body.fetch("access_token")

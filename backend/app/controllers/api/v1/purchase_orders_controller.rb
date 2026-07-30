@@ -1,15 +1,50 @@
 module Api
   module V1
     class PurchaseOrdersController < ApplicationController
+      # Writes here and writes arriving on the sync pipeline both go through the Purchasing::
+      # services, so the lifecycle table and the line rules cannot drift between the two
+      # surfaces — the same reason InventoryMovementsController#create goes through
+      # Inventory::RecordMovement.
+      ARGUMENT_ERROR_CODES = {
+        "Invalid supplier" => "invalid_supplier",
+        "Invalid location" => "invalid_location",
+        "Invalid variant" => "invalid_variant"
+      }.freeze
+
       before_action :authenticate!
       before_action :load_purchase_order, only: %i[show update destroy]
+
+      # One handler rather than two declarations, because InvalidTransition is an ArgumentError
+      # and which of two rescue_from blocks wins would come down to declaration order.
+      rescue_from ArgumentError do |error|
+        if error.is_a?(Purchasing::OrderLifecycle::InvalidTransition)
+          render_error(code: "invalid_transition", message: error.message, status: :conflict)
+        else
+          render_error(
+            code: ARGUMENT_ERROR_CODES.fetch(error.message, "invalid_request"),
+            message: error.message,
+            status: :unprocessable_entity
+          )
+        end
+      end
 
       def index
         require_permission!("purchasing.read")
         return if performed?
 
         orders = PurchaseOrder.where(org_id: current_organization.id).order(created_at: :desc)
-        orders = orders.where(status: params[:status]) if params[:status].present?
+
+        if params[:status].present?
+          status = Purchasing::OrderLifecycle.normalize(params[:status])
+          # An unknown status is a caller mistake, not an empty result set.
+          unless Purchasing::OrderLifecycle.status?(status)
+            return render_error(code: "invalid_status", message: "Invalid status", status: :unprocessable_entity)
+          end
+
+          orders = orders.where(status: status)
+        end
+        orders = orders.where(supplier_id: params[:supplier_id]) if params[:supplier_id].present?
+
         render json: { purchase_orders: orders.limit(200).map { |po| purchase_order_payload(po) } }
       end
 
@@ -24,66 +59,55 @@ module Api
         require_permission!("purchasing.write")
         return if performed?
 
-        attrs = purchase_order_params.to_h
-        items = Array(attrs.delete("items") || attrs.delete(:items)).compact
+        attrs = purchase_order_params
+        order = Purchasing::CreateOrder.call(
+          org_id: current_organization.id,
+          supplier_id: attrs[:supplier_id],
+          location_id: attrs[:location_id],
+          expected_at: attrs[:expected_at],
+          items: attrs[:items],
+          created_by: current_user.id
+        )
 
-        supplier_id = attrs.fetch("supplier_id") { attrs.fetch(:supplier_id) }
-        location_id = attrs.fetch("location_id") { attrs.fetch(:location_id) }
-        return render_error(code: "invalid_supplier", message: "Invalid supplier", status: :unprocessable_entity) unless Supplier.where(org_id: current_organization.id, id: supplier_id).exists?
-        return render_error(code: "invalid_location", message: "Invalid location", status: :unprocessable_entity) unless Location.where(org_id: current_organization.id, id: location_id).exists?
-
-        order = nil
-        PurchaseOrder.transaction do
-          order = PurchaseOrder.create!(
-            attrs.merge(
-              org_id: current_organization.id,
-              created_by: current_user.id
-            )
-          )
-          replace_items!(order, items) if items.any?
-          order.update!(total_cost: compute_total_cost(order))
+        # An order is always born a draft; a caller naming a later status is asking for that
+        # transition, and it is guarded like any other.
+        if attrs[:status].present? && Purchasing::OrderLifecycle.normalize(attrs[:status]) != order.status
+          Purchasing::TransitionOrder.call(order: order, to: attrs[:status])
         end
 
         render json: { purchase_order: purchase_order_payload(order, include_items: true) }, status: :created
-      rescue ActiveRecord::RecordNotUnique
-        render_error(code: "not_unique", message: "Record already exists", status: :conflict)
       end
 
       def update
         require_permission!("purchasing.write")
         return if performed?
 
-        attrs = purchase_order_params.to_h
-        items = Array(attrs.delete("items") || attrs.delete(:items)).compact
+        attrs = purchase_order_params
 
-        if attrs.key?("supplier_id") || attrs.key?(:supplier_id)
-          supplier_id = attrs["supplier_id"] || attrs[:supplier_id]
-          return render_error(code: "invalid_supplier", message: "Invalid supplier", status: :unprocessable_entity) unless Supplier.where(org_id: current_organization.id, id: supplier_id).exists?
-        end
-        if attrs.key?("location_id") || attrs.key?(:location_id)
-          location_id = attrs["location_id"] || attrs[:location_id]
-          return render_error(code: "invalid_location", message: "Invalid location", status: :unprocessable_entity) unless Location.where(org_id: current_organization.id, id: location_id).exists?
-        end
-
-        PurchaseOrder.transaction do
-          @purchase_order.update!(attrs)
-          replace_items!(@purchase_order, items) if items.any?
-          @purchase_order.update!(total_cost: compute_total_cost(@purchase_order))
-        end
+        # Edits land before the transition, so "these are the final lines, now approve it" still
+        # edits while the order is a draft.
+        Purchasing::UpdateOrder.call(order: @purchase_order, attrs: attrs) if Purchasing::UpdateOrder.edits?(attrs)
+        Purchasing::TransitionOrder.call(order: @purchase_order, to: attrs[:status]) if attrs[:status].present?
 
         render json: { purchase_order: purchase_order_payload(@purchase_order, include_items: true) }
-      rescue ActiveRecord::RecordNotUnique
-        render_error(code: "not_unique", message: "Record already exists", status: :conflict)
       end
 
       def destroy
         require_permission!("purchasing.write")
         return if performed?
 
+        # Only a draft can be thrown away. Once the order is approved the supplier has seen it,
+        # so the record has to survive — cancel it instead.
+        unless Purchasing::OrderLifecycle.editable?(@purchase_order.status)
+          return render_error(
+            code: "invalid_transition",
+            message: "Cannot delete a purchase order that is #{@purchase_order.status}",
+            status: :conflict
+          )
+        end
+
         @purchase_order.destroy!
         head :no_content
-      rescue ActiveRecord::InvalidForeignKey
-        render_error(code: "invalid_foreign_key", message: "Record is referenced by other records", status: :conflict)
       end
 
       private
@@ -93,35 +117,18 @@ module Api
       end
 
       def purchase_order_params
-        params.require(:purchase_order).permit(:supplier_id, :location_id, :status, :expected_at, items: %i[variant_id quantity_ordered unit_cost])
-      end
-
-      def replace_items!(order, items)
-        order.purchase_items.destroy_all
-        items.each do |item|
-          item_hash = item.to_h
-          variant_id = item_hash.fetch("variant_id") { item_hash.fetch(:variant_id) }
-          return render_error(code: "invalid_variant", message: "Invalid variant", status: :unprocessable_entity) unless Variant.where(org_id: current_organization.id, id: variant_id).exists?
-
-          PurchaseItem.create!(
-            purchase_order_id: order.id,
-            variant_id: variant_id,
-            quantity_ordered: item_hash.fetch("quantity_ordered") { item_hash.fetch(:quantity_ordered) },
-            unit_cost: item_hash.fetch("unit_cost") { item_hash.fetch(:unit_cost) }
-          )
-        end
-      end
-
-      def compute_total_cost(order)
-        order.purchase_items.sum("quantity_ordered * unit_cost")
+        params
+          .require(:purchase_order)
+          .permit(:supplier_id, :location_id, :status, :expected_at, items: %i[id variant_id quantity_ordered unit_cost])
+          .to_h
+          .symbolize_keys
       end
 
       def purchase_order_payload(order, include_items: false)
         payload = order.slice(:id, :org_id, :supplier_id, :location_id, :status, :expected_at, :total_cost, :created_by, :created_at, :updated_at)
-        payload[:items] = order.purchase_items.order(:created_at).map { |item| item.slice(:id, :purchase_order_id, :variant_id, :quantity_ordered, :unit_cost, :created_at) } if include_items
+        payload[:items] = Purchasing::OrderLines.payload(order) if include_items
         payload
       end
     end
   end
 end
-

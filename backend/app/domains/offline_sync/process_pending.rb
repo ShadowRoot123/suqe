@@ -85,6 +85,14 @@ module OfflineSync
         return apply_stock_threshold(item)
       end
 
+      if item.entity == "supplier"
+        return apply_supplier(item)
+      end
+
+      if item.entity == "purchase_order"
+        return apply_purchase_order(item)
+      end
+
       { status: "applied", entity_id: nil, record: nil, error: nil }
     rescue StandardError => e
       { status: "failed", entity_id: nil, record: nil, error: e.message }
@@ -670,6 +678,207 @@ module OfflineSync
         BigDecimal(value.to_s.strip)
       rescue ArgumentError, TypeError
         raise ArgumentError, "#{field} must be a number"
+      end
+    end
+
+    # A supplier is plain reference data, so this is the same shape as apply_location: unique
+    # name per org, and a delete that anything points at has to fail readably.
+    def apply_supplier(item)
+      payload = normalize_hash(item.payload)
+      org_id = item.org_id
+
+      case item.operation
+      when "create"
+        name = fetch_key(payload, :name).to_s.strip
+        requested_id = fetch_key(payload, :id).presence
+        raise ArgumentError, "Missing field: name" if name.blank?
+
+        supplier =
+          begin
+            with_savepoint do
+              Supplier.create!(
+                { id: requested_id, org_id: org_id, name: name, phone: fetch_key(payload, :phone).presence,
+                  email: fetch_key(payload, :email).presence, address: fetch_key(payload, :address).presence }.compact
+              )
+            end
+          rescue ActiveRecord::RecordNotUnique
+            # Either this exact command is being replayed (same id) or a second device already
+            # added the same supplier — both mean the org has the supplier that was asked for.
+            (requested_id.present? ? Supplier.find_by(org_id: org_id, id: requested_id) : nil) ||
+              Supplier.find_by!(org_id: org_id, name: name)
+          end
+
+        return { status: "applied", entity_id: supplier.id, record: supplier_record(supplier), error: nil }
+      when "update"
+        supplier_id = fetch_key(payload, :id).presence
+        raise ArgumentError, "Missing field: id" if supplier_id.blank?
+
+        supplier = Supplier.find_by(org_id: org_id, id: supplier_id)
+        return { status: "applied", entity_id: supplier_id, record: { id: supplier_id }, error: nil } if supplier.blank?
+
+        updates = {}
+        updates[:name] = fetch_key(payload, :name).to_s.strip if payload.key?("name") || payload.key?(:name)
+        %i[phone email address].each do |field|
+          next unless payload.key?(field.to_s) || payload.key?(field)
+
+          updates[field] = fetch_key(payload, field).presence
+        end
+        raise ArgumentError, "Missing field: name" if updates.key?(:name) && updates[:name].blank?
+        supplier.update!(updates) if updates.any?
+
+        return { status: "applied", entity_id: supplier.id, record: supplier_record(supplier), error: nil }
+      when "delete"
+        supplier_id = fetch_key(payload, :id).presence
+        raise ArgumentError, "Missing field: id" if supplier_id.blank?
+
+        supplier = Supplier.find_by(org_id: org_id, id: supplier_id)
+        if supplier.present?
+          begin
+            # purchase_orders.supplier_id is ON DELETE RESTRICT, so a supplier the org has ordered
+            # from cannot go. Take the savepoint: rescuing the violation without one would leave
+            # the outer transaction aborted.
+            Supplier.transaction(requires_new: true) { supplier.destroy! }
+          rescue ActiveRecord::StatementInvalid => e
+            raise unless e.cause.class.name.match?(/RestrictViolation|ForeignKeyViolation/)
+
+            raise ArgumentError, "Supplier has purchase orders and cannot be deleted"
+          end
+        end
+
+        return { status: "applied", entity_id: supplier_id, record: { id: supplier_id }, error: nil }
+      end
+
+      { status: "failed", entity_id: nil, record: nil, error: "Unsupported operation: #{item.operation}" }
+    rescue StandardError => e
+      { status: "failed", entity_id: fetch_key(payload, :id), record: payload, error: e.message }
+    end
+
+    # A purchase order is a header plus its lines, and both travel in one command: the device
+    # edits the order as a whole, and splitting it would let a line land without its header.
+    # Status changes ride the same `update` operation — the pipeline only speaks create/update/
+    # delete — but go through TransitionOrder so the lifecycle table still guards them.
+    def apply_purchase_order(item)
+      payload = normalize_hash(item.payload)
+      org_id = item.org_id
+
+      case item.operation
+      when "create"
+        order = Purchasing::CreateOrder.call(
+          org_id: org_id,
+          id: fetch_key(payload, :id).presence,
+          supplier_id: fetch_key(payload, :supplier_id),
+          location_id: fetch_key(payload, :location_id),
+          expected_at: parse_time(fetch_key(payload, :expected_at), field: "expected_at"),
+          items: fetch_key(payload, :items),
+          created_by: actor_id(org_id, fetch_key(payload, :created_by))
+        )
+
+        # An order is always born a draft, but the device mirrors its own row and will send the
+        # status it holds; honour anything past draft as the transition it is.
+        requested_status = fetch_key(payload, :status).presence
+        if requested_status.present? && Purchasing::OrderLifecycle.normalize(requested_status) != order.status
+          Purchasing::TransitionOrder.call(order: order, to: requested_status)
+        end
+
+        return { status: "applied", entity_id: order.id, record: purchase_order_record(order), error: nil }
+      when "update"
+        order_id = fetch_key(payload, :id).presence
+        raise ArgumentError, "Missing field: id" if order_id.blank?
+
+        order = PurchaseOrder.find_by(org_id: org_id, id: order_id)
+        return { status: "applied", entity_id: order_id, record: { id: order_id }, error: nil } if order.blank?
+
+        attrs = purchase_order_edits(payload)
+        # Edits land before the transition, so "these are the final lines, now approve it" — one
+        # user action, queued offline as one command — still edits while the order is a draft.
+        Purchasing::UpdateOrder.call(order: order, attrs: attrs) if Purchasing::UpdateOrder.edits?(attrs)
+
+        if payload.key?("status") || payload.key?(:status)
+          status = fetch_key(payload, :status).presence
+          raise ArgumentError, "Missing field: status" if status.blank?
+
+          Purchasing::TransitionOrder.call(order: order, to: status)
+        end
+
+        return { status: "applied", entity_id: order.id, record: purchase_order_record(order), error: nil }
+      when "delete"
+        order_id = fetch_key(payload, :id).presence
+        raise ArgumentError, "Missing field: id" if order_id.blank?
+
+        order = PurchaseOrder.find_by(org_id: org_id, id: order_id)
+        if order.present?
+          # Only a draft can be thrown away. Once the order has been approved the supplier has
+          # seen it, so the record of it has to survive — cancel it instead.
+          unless Purchasing::OrderLifecycle.editable?(order.status)
+            raise ArgumentError, "Cannot delete a purchase order that is #{order.status}"
+          end
+
+          order.destroy!
+        end
+
+        return { status: "applied", entity_id: order_id, record: { id: order_id }, error: nil }
+      end
+
+      { status: "failed", entity_id: nil, record: nil, error: "Unsupported operation: #{item.operation}" }
+    rescue StandardError => e
+      { status: "failed", entity_id: fetch_key(payload, :id), record: payload, error: e.message }
+    end
+
+    # Only the keys the command actually names, so a status-only command cannot blank the lines.
+    def purchase_order_edits(payload)
+      attrs = {}
+      %i[supplier_id location_id items].each do |field|
+        attrs[field] = fetch_key(payload, field) if payload.key?(field.to_s) || payload.key?(field)
+      end
+      if payload.key?("expected_at") || payload.key?(:expected_at)
+        attrs[:expected_at] = parse_time(fetch_key(payload, :expected_at), field: "expected_at")
+      end
+      attrs
+    end
+
+    def supplier_record(supplier)
+      {
+        id: supplier.id,
+        name: supplier.name,
+        phone: supplier.phone,
+        email: supplier.email,
+        address: supplier.address
+      }
+    end
+
+    def purchase_order_record(order)
+      {
+        id: order.id,
+        supplier_id: order.supplier_id,
+        location_id: order.location_id,
+        status: order.status,
+        expected_at: order.expected_at&.iso8601(6),
+        total_cost: order.total_cost.to_s,
+        created_by: order.created_by,
+        items: Purchasing::OrderLines.payload(order)
+      }
+    end
+
+    # A datetime column casts garbage to nil, which would silently clear an expected delivery
+    # date on a typo, so an unparseable value has to fail the command instead.
+    #
+    # Strictly ISO 8601, and not Time.zone.parse, which is lenient enough to pull a weekday out
+    # of prose ("next tuesday-ish" becomes a real date) — the client sends the same format the
+    # change feed emits, so anything else is a bug worth reporting. A date with no time is
+    # accepted because an expected-delivery picker has no reason to carry one.
+    def parse_time(value, field:)
+      return nil if value.nil? || value.to_s.strip.empty?
+      return value if value.is_a?(Time) || value.is_a?(DateTime)
+
+      raw = value.to_s.strip
+      begin
+        Time.iso8601(raw)
+      rescue ArgumentError
+        begin
+          Time.zone.parse(Date.iso8601(raw).to_s)
+        rescue ArgumentError
+          raise ArgumentError, "#{field} must be an ISO 8601 date"
+        end
       end
     end
 
