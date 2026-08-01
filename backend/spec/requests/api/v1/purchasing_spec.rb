@@ -341,6 +341,23 @@ RSpec.describe "Purchasing", type: :request do
       expect(JSON.parse(response.body).fetch("code")).to eq("invalid_purchase_order")
     end
 
+    # The offline client's bootstrap read: it totals these against the order to know what is still
+    # outstanding, so lines have to come with the list rather than one request per receipt.
+    it "lists receipts with their lines" do
+      session = start_session!
+      approve!(session)
+      post_receipt!(session, items: [{ variant_id: session[:variant].id, quantity_received: "4" }])
+
+      get "/api/v1/purchase_receipts?purchase_order_id=#{session[:order].id}", headers: session[:auth], as: :json
+
+      expect(response).to have_http_status(:ok)
+      receipts = JSON.parse(response.body).fetch("purchase_receipts")
+      expect(receipts.length).to eq(1)
+      expect(receipts.first.fetch("items")).to contain_exactly(
+        a_hash_including("variant_id" => session[:variant].id, "quantity_received" => "4.0", "unit_cost" => "2.5")
+      )
+    end
+
     # Same idempotency key twice is how a retried request announces itself.
     it "returns the original receipt when the same idempotency key is sent twice" do
       session = start_session!

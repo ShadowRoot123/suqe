@@ -6,6 +6,7 @@ import { hasPermission } from "@/auth/permissions";
 import { useSession } from "@/auth/session";
 import { productsList } from "@/catalog/products";
 import { locationsGetById } from "@/inventory/locations";
+import { formatQuantity } from "@/inventory/lib/quantity";
 import { variantsListAll } from "@/catalog/variants";
 import { calendarDate } from "@/purchasing/lib/calendarDate";
 import { formatMoney, lineTotal, moneyOrZero } from "@/purchasing/lib/money";
@@ -17,7 +18,9 @@ import {
   STATUS_TONE,
   type OrderStatus,
 } from "@/purchasing/lib/orderLifecycle";
+import { outstandingLines } from "@/purchasing/lib/receiving";
 import { ordersGetById, type OrderRow } from "@/purchasing/orders";
+import { receiptsListForOrder, type ReceiptRow } from "@/purchasing/receipts";
 import { suppliersGetById } from "@/purchasing/suppliers";
 import { deletePurchaseOrderOffline, transitionPurchaseOrderOffline } from "@/sync/syncEngine";
 import { outboxUnsettledEntityIds } from "@/sync/outbox";
@@ -33,6 +36,8 @@ type DetailLine = {
   quantity_ordered: string;
   unit_cost: string;
   line_total: string;
+  /** Blank until something has been delivered — an order that is still on its way says nothing. */
+  received: string;
 };
 
 /**
@@ -54,6 +59,7 @@ export default function PurchaseOrderDetailScreen() {
   const id = typeof params.id === "string" ? params.id : "";
   const { session } = useSession();
   const canWrite = hasPermission(session, "purchasing.write");
+  const canReceive = hasPermission(session, "purchasing.receive");
 
   const [loading, setLoading] = React.useState(true);
   const [busy, setBusy] = React.useState(false);
@@ -61,6 +67,7 @@ export default function PurchaseOrderDetailScreen() {
   const [supplierName, setSupplierName] = React.useState("");
   const [locationName, setLocationName] = React.useState("");
   const [lines, setLines] = React.useState<DetailLine[]>([]);
+  const [receipts, setReceipts] = React.useState<ReceiptRow[]>([]);
   const [pending, setPending] = React.useState(false);
 
   const load = React.useCallback(async () => {
@@ -71,23 +78,29 @@ export default function PurchaseOrderDetailScreen() {
       return;
     }
 
-    const [supplier, location, variants, products, inFlight] = await Promise.all([
+    const [supplier, location, variants, products, inFlight, receiptRows] = await Promise.all([
       suppliersGetById(row.supplier_id),
       locationsGetById(row.location_id),
       variantsListAll(),
       productsList(),
       outboxUnsettledEntityIds("purchase_order"),
+      receiptsListForOrder(row.id),
     ]);
 
     const variantById = new Map(variants.map((v) => [v.id, v]));
     const productNameById = new Map(products.map((p) => [p.id, p.name]));
+    const receivedByVariant = new Map(
+      outstandingLines(row, receiptRows).map((line) => [line.variant_id, line.received])
+    );
 
     setSupplierName(supplier?.name ?? "Unknown supplier");
     setLocationName(location?.name ?? "Unknown location");
     setPending(inFlight.has(row.id));
+    setReceipts(receiptRows);
     setLines(
       row.items.map((item) => {
         const variant = variantById.get(item.variant_id);
+        const received = receivedByVariant.get(item.variant_id) ?? 0;
         return {
           id: item.id,
           variant_id: item.variant_id,
@@ -96,6 +109,7 @@ export default function PurchaseOrderDetailScreen() {
           quantity_ordered: item.quantity_ordered,
           unit_cost: item.unit_cost,
           line_total: formatMoney(lineTotal(item)),
+          received: received > 0 ? formatQuantity(received) : "",
         };
       })
     );
@@ -210,6 +224,13 @@ export default function PurchaseOrderDetailScreen() {
               sortValue: (l: DetailLine) => Number(l.quantity_ordered),
             },
             {
+              key: "received",
+              title: "Received",
+              minWidth: 110,
+              render: (l: DetailLine) => l.received || "—",
+              sortValue: (l: DetailLine) => Number(l.received || 0),
+            },
+            {
               key: "cost",
               title: "Unit cost",
               minWidth: 120,
@@ -227,6 +248,44 @@ export default function PurchaseOrderDetailScreen() {
           rows={lines}
           getRowId={(l: DetailLine) => l.id}
         />
+
+        {/*
+          Its own card, outside the purchasing.write block: warehouse staff hold purchasing.receive
+          without purchasing.write, and booking a delivery in is the whole of their job here.
+        */}
+        {canReceive || receipts.length > 0 ? (
+          <Card title="Deliveries">
+            <Stack gap={12}>
+              {receipts.length === 0 ? (
+                <AppText muted>Nothing has been booked in against this order yet.</AppText>
+              ) : (
+                receipts.map((receipt) => (
+                  <View
+                    key={receipt.id}
+                    style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}
+                  >
+                    <AppText>
+                      {calendarDate(receipt.received_at, "—")} · {receipt.items.length}{" "}
+                      {receipt.items.length === 1 ? "line" : "lines"} ·{" "}
+                      {formatQuantity(
+                        receipt.items.reduce((sum, line) => sum + (Number(line.quantity_received) || 0), 0)
+                      )}{" "}
+                      units
+                    </AppText>
+                    {receipt.synced ? null : <Badge tone="warning" label="Unsynced" />}
+                  </View>
+                ))
+              )}
+              {receivable && canReceive ? (
+                <Button
+                  title="Receive goods"
+                  disabled={busy}
+                  onPress={() => router.push(`/(tabs)/purchasing/${order.id}/receive`)}
+                />
+              ) : null}
+            </Stack>
+          </Card>
+        ) : null}
 
         {canWrite ? (
           <Card title="What happens next">

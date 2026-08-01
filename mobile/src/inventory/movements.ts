@@ -91,7 +91,10 @@ export async function movementsListRecent(limit = 50): Promise<MovementRow[]> {
   return await db.getAllAsync<MovementRow>("SELECT * FROM inventory_movements ORDER BY created_at DESC LIMIT ?", [limit]);
 }
 
-/** Adjustments the server has not acknowledged yet — added on top of the snapshot cache. */
+/**
+ * Movements the server has not acknowledged yet — added on top of the snapshot cache. Adjustments
+ * made offline, and the `purchase` rows a receipt writes before it syncs.
+ */
 export async function movementsListUnsynced(): Promise<MovementRow[]> {
   if (Platform.OS === "web") {
     return sortNewestFirst(webRead().filter((r) => !r.synced));

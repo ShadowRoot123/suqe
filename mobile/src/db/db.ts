@@ -4,7 +4,7 @@ import { Platform } from "react-native";
 export type SqlDatabase = SQLiteDatabase;
 
 let dbPromise: Promise<SqlDatabase> | null = null;
-const SCHEMA_VERSION = 8;
+const SCHEMA_VERSION = 9;
 
 export async function getDb(): Promise<SqlDatabase> {
   if (!dbPromise) dbPromise = openDatabaseAsync("myshop.db");
@@ -125,6 +125,21 @@ export async function migrate() {
     );
     await db.execAsync("CREATE INDEX IF NOT EXISTS idx_purchase_orders_supplier ON purchase_orders (supplier_id)");
     current = 8;
+    await db.execAsync(`PRAGMA user_version = ${current}`);
+  }
+
+  if (current < 9) {
+    // Receipt lines sit in items_json for the same reason an order's do: they only ever travel
+    // with their header, and one column keeps the write atomic on both platforms.
+    // `synced` mirrors inventory_movements — a receipt made offline is real to this device
+    // before the server has seen it, and that is what the outstanding quantity is computed from.
+    await db.execAsync(
+      "CREATE TABLE IF NOT EXISTS purchase_receipts (id TEXT PRIMARY KEY NOT NULL, purchase_order_id TEXT NOT NULL, received_at TEXT NOT NULL, received_by TEXT, items_json TEXT NOT NULL DEFAULT '[]', synced INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)"
+    );
+    await db.execAsync(
+      "CREATE INDEX IF NOT EXISTS idx_purchase_receipts_order ON purchase_receipts (purchase_order_id, received_at DESC)"
+    );
+    current = 9;
     await db.execAsync(`PRAGMA user_version = ${current}`);
   }
 

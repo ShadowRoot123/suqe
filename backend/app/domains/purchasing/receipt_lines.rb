@@ -42,6 +42,21 @@ module Purchasing
       ordered.all? { |variant_id, quantity| received.fetch(variant_id, 0.to_d) >= quantity }
     end
 
+    # The lines alone, without asking the ledger anything. What a list of receipts needs: the
+    # client totals them to work out what is still outstanding on an order, and `payload`'s
+    # per-line on-hand query would be one round trip per line across the whole index.
+    def self.summary(receipt)
+      receipt.purchase_receipt_items.sort_by(&:variant_id).map do |line|
+        {
+          id: line.id,
+          receipt_id: line.receipt_id,
+          variant_id: line.variant_id,
+          quantity_received: line.quantity_received.to_s,
+          unit_cost: line.unit_cost.to_s
+        }
+      end
+    end
+
     def self.payload(receipt)
       location_id = receipt.purchase_order.location_id
       # One query for the whole receipt; the index on (org_id, reference_type, reference_id)

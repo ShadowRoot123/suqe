@@ -189,6 +189,25 @@ export type PurchaseOrder = {
   items?: PurchaseOrderItem[];
 };
 
+export type PurchaseReceiptItem = {
+  id: string;
+  receipt_id: string;
+  variant_id: string;
+  quantity_received: string;
+  unit_cost: string;
+};
+
+export type PurchaseReceipt = {
+  id: string;
+  org_id: string;
+  purchase_order_id: string;
+  received_at: string;
+  received_by: string | null;
+  created_at: string;
+  /** The index carries lines so a fresh device can work out what is still outstanding. */
+  items?: PurchaseReceiptItem[];
+};
+
 export type CategoriesIndexResponse = { categories: Category[] };
 export type ProductsIndexResponse = { products: Product[] };
 export type VariantsIndexResponse = { variants: Variant[] };
@@ -198,6 +217,7 @@ export type StockThresholdsIndexResponse = { stock_thresholds: StockThreshold[] 
 export type SuppliersIndexResponse = { suppliers: Supplier[] };
 export type PurchaseOrdersIndexResponse = { purchase_orders: PurchaseOrder[] };
 export type PurchaseOrderShowResponse = { purchase_order: PurchaseOrder };
+export type PurchaseReceiptsIndexResponse = { purchase_receipts: PurchaseReceipt[] };
 export type LowStockIndexResponse = { low_stock: LowStockRow[] };
 /** `next_cursor` is null on the last page — the keyset cursor, not an offset. */
 export type InventoryMovementsIndexResponse = { inventory_movements: InventoryMovement[]; next_cursor: string | null };
@@ -254,6 +274,14 @@ export function apiForSession(session: Session | null) {
     },
     purchaseOrderShow: (id: string) =>
       client.request<PurchaseOrderShowResponse>({ path: `/purchase_orders/${id}` }).then((r) => r.data),
+    purchaseReceiptsIndex: (args?: { purchase_order_id?: string | null }) => {
+      const params = new URLSearchParams();
+      if (args?.purchase_order_id) params.set("purchase_order_id", args.purchase_order_id);
+      const query = params.toString();
+      return client
+        .request<PurchaseReceiptsIndexResponse>({ path: query ? `/purchase_receipts?${query}` : "/purchase_receipts" })
+        .then((r) => r.data);
+    },
     lowStockIndex: (args?: { location_id?: string | null }) => {
       const params = new URLSearchParams();
       if (args?.location_id) params.set("location_id", args.location_id);

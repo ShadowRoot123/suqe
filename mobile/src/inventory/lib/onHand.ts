@@ -8,7 +8,7 @@ export type OnHandCell = {
   location_id: string;
   /** Last known server on-hand. */
   synced: number;
-  /** Sum of local adjustments the server has not acknowledged yet. */
+  /** Sum of local movements the server has not acknowledged yet — adjustments and receipts. */
   pending: number;
   /** What the user should see: synced + pending. */
   quantity: number;

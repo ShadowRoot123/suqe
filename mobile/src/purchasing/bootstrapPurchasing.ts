@@ -2,11 +2,18 @@ import { apiForSession } from "@/api/endpoints";
 import type { Session } from "@/auth/session";
 import { kvGet, kvSet } from "@/db/kv";
 import { ordersUpsert } from "@/purchasing/orders";
+import { receiptsUpsert } from "@/purchasing/receipts";
 import { suppliersUpsert } from "@/purchasing/suppliers";
 import { outboxUnsettledEntityIds } from "@/sync/outbox";
 
+/**
+ * Bumped to v2 when receipts joined the seed. A device that bootstrapped under v1 has orders but
+ * no receipts, so it would offer the whole ordered quantity as outstanding on an order that has
+ * already been half delivered — and the server would refuse the receipt. Changing the key makes
+ * those devices seed once more; bump it again whenever this function learns to fetch something new.
+ */
 function bootKey(orgId: string) {
-  return `purchasing_bootstrap_v1.${orgId}`;
+  return `purchasing_bootstrap_v2.${orgId}`;
 }
 
 /**
@@ -28,9 +35,10 @@ export async function refreshPurchasingFromServer(session: Session) {
 
   // A row the user just created or edited offline is ahead of the server's copy until its command
   // is acknowledged, so REST must not write over it.
-  const [suppliersInFlight, ordersInFlight] = await Promise.all([
+  const [suppliersInFlight, ordersInFlight, receiptsInFlight] = await Promise.all([
     outboxUnsettledEntityIds("supplier"),
     outboxUnsettledEntityIds("purchase_order"),
+    outboxUnsettledEntityIds("purchase_receipt"),
   ]);
 
   const suppliers = await api.suppliersIndex();
@@ -59,6 +67,22 @@ export async function refreshPurchasingFromServer(session: Session) {
       created_by: order.created_by,
       items: order.items ?? [],
       updated_at: order.updated_at,
+    });
+  }
+
+  // Without the receipts a fresh device would offer the whole ordered quantity as outstanding on
+  // an order that has already been half delivered, and the server would refuse the receipt.
+  const receipts = await api.purchaseReceiptsIndex();
+  for (const receipt of receipts.purchase_receipts) {
+    if (receiptsInFlight.has(receipt.id)) continue;
+    await receiptsUpsert({
+      id: receipt.id,
+      purchase_order_id: receipt.purchase_order_id,
+      received_at: receipt.received_at,
+      received_by: receipt.received_by,
+      items: receipt.items ?? [],
+      synced: true,
+      updated_at: receipt.created_at,
     });
   }
 }

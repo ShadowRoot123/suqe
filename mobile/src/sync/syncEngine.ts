@@ -13,6 +13,7 @@ import { snapshotsSet } from "@/inventory/snapshots";
 import { thresholdsDelete, thresholdsFindTarget, thresholdsUpsert } from "@/inventory/thresholds";
 import { formatMoney, parseMoney } from "@/purchasing/lib/money";
 import { isEditable, transitionError, type OrderStatus } from "@/purchasing/lib/orderLifecycle";
+import { receiptError, statusAfterReceipts, type ReceiptInputLine } from "@/purchasing/lib/receiving";
 import {
   ordersDelete,
   ordersExistForSupplier,
@@ -21,6 +22,13 @@ import {
   ordersUpsert,
   type OrderLineRow,
 } from "@/purchasing/orders";
+import {
+  receiptsDelete,
+  receiptsGetById,
+  receiptsListForOrder,
+  receiptsUpsert,
+  type ReceiptLineRow,
+} from "@/purchasing/receipts";
 import { suppliersDelete, suppliersGetById, suppliersUpsert } from "@/purchasing/suppliers";
 import { getDeviceId } from "@/sync/device";
 import { makeIdempotencyKey } from "@/sync/idempotency";
@@ -764,6 +772,90 @@ export async function transitionPurchaseOrderOffline(args: { id: string; status:
   });
 }
 
+/**
+ * Books goods in against an order. Validated locally first — the mirror in
+ * `purchasing/lib/receiving.ts` — so an over-receipt is refused while the user is looking at the
+ * field rather than after the next push.
+ *
+ * Three local writes, in the shape the pull feed will confirm: the receipt, one **unsynced
+ * `purchase` movement per line** (so on-hand rises immediately, exactly as an offline adjustment
+ * does), and the order's status. Each movement takes its receipt line's id, which is what lets a
+ * refused receipt find and drop them again.
+ */
+export async function receiveOrderOffline(args: {
+  purchase_order_id: string;
+  items: ReceiptInputLine[];
+  received_at?: string | null;
+  received_by?: string | null;
+}) {
+  const order = await ordersGetById(args.purchase_order_id);
+  if (!order) throw new Error("Purchase order not found");
+
+  const receipts = await receiptsListForOrder(order.id);
+  const error = receiptError({ order, receipts, lines: args.items });
+  if (error) throw new Error(error);
+
+  const id = makeUuid();
+  const now = new Date().toISOString();
+  const received_at = args.received_at ?? now;
+  const ordered = new Map(order.items.map((line) => [line.variant_id, line]));
+
+  const items: ReceiptLineRow[] = args.items.map((line) => {
+    const quantity = parseQuantity(line.quantity_received) ?? 0;
+    // A line that names no cost was received at the cost it was ordered at — the same default
+    // the server applies, resolved here so the local row is not a guess.
+    const named = line.unit_cost !== null && line.unit_cost !== undefined && String(line.unit_cost).trim() !== "";
+    const cost = named ? parseMoney(line.unit_cost) : parseMoney(ordered.get(line.variant_id)?.unit_cost);
+    return {
+      id: makeUuid(),
+      variant_id: line.variant_id,
+      quantity_received: formatQuantity(quantity),
+      unit_cost: formatMoney(cost ?? 0),
+    };
+  });
+
+  await receiptsUpsert({
+    id,
+    purchase_order_id: order.id,
+    received_at,
+    received_by: args.received_by ?? null,
+    items,
+    synced: false,
+    updated_at: now,
+  });
+
+  for (const line of items) {
+    await movementsUpsert({
+      id: line.id,
+      variant_id: line.variant_id,
+      location_id: order.location_id,
+      type: "purchase",
+      quantity_delta: line.quantity_received,
+      created_at: received_at,
+      synced: false,
+    });
+  }
+
+  // The status follows the goods. `ordersSetStatus` rather than a transition command: the status
+  // is the server's to settle, and it will confirm it on the receipt's own change record.
+  await ordersSetStatus(order.id, statusAfterReceipts(order, [...receipts, { items }]), now);
+
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("rec"),
+    entity: "purchase_receipt",
+    operation: "create",
+    payload: {
+      id,
+      purchase_order_id: order.id,
+      received_at,
+      received_by: args.received_by ?? null,
+      items,
+    },
+  });
+
+  return id;
+}
+
 export async function deletePurchaseOrderOffline(id: string) {
   const existing = await ordersGetById(id);
   if (existing && !isEditable(existing.status)) {
@@ -807,6 +899,23 @@ async function applyChanges(changes: SyncPullChange[]) {
       // corrects it; same limitation as a refused location delete.
       if (change.entity === "purchase_order" && operation === "create") {
         await ordersDelete(id);
+      }
+      // A refused receipt never moved stock on the server, so the optimistic receipt and its
+      // movements go. Unlike a refused order update this one *can* repair the status it left
+      // behind: the receipts are local, so the order's status is recomputed from the ones that
+      // survive — back to `approved` when this was the only one.
+      if (change.entity === "purchase_receipt" && operation === "create") {
+        const rejected = await receiptsGetById(id);
+        if (rejected) {
+          for (const line of rejected.items) await movementsDelete(line.id);
+          await receiptsDelete(id);
+
+          const order = await ordersGetById(rejected.purchase_order_id);
+          if (order) {
+            const surviving = await receiptsListForOrder(order.id);
+            await ordersSetStatus(order.id, statusAfterReceipts(order, surviving), change.created_at);
+          }
+        }
       }
       continue;
     }
@@ -973,6 +1082,59 @@ async function applyChanges(changes: SyncPullChange[]) {
         items: record?.items ?? [],
         updated_at: change.created_at,
       });
+      continue;
+    }
+
+    if (change.entity === "purchase_receipt") {
+      const purchase_order_id = String(record?.purchase_order_id ?? "");
+      if (!purchase_order_id) continue;
+
+      const items = Array.isArray(record?.items) ? (record.items as any[]) : [];
+      const local = await receiptsGetById(id);
+
+      await receiptsUpsert({
+        id,
+        purchase_order_id,
+        received_at: record?.received_at ? String(record.received_at) : change.created_at,
+        received_by: record?.received_by ? String(record.received_by) : null,
+        items,
+        synced: true,
+        updated_at: change.created_at,
+      });
+
+      // The optimistic movements were keyed by this device's line ids; the server's carry its own.
+      // Drop ours before adding the server's, or the ledger would hold both and on-hand would
+      // count the delivery twice.
+      for (const line of local?.items ?? []) await movementsDelete(line.id);
+
+      const location_id = String(record?.purchase_order?.location_id ?? "");
+      for (const line of items) {
+        const variant_id = String(line?.variant_id ?? "");
+        if (!variant_id) continue;
+
+        const movement_id = line?.movement_id ? String(line.movement_id) : "";
+        if (movement_id && location_id) {
+          await movementsUpsert({
+            id: movement_id,
+            variant_id,
+            location_id,
+            type: "purchase",
+            quantity_delta: line?.quantity_received ?? "0",
+            created_at: record?.received_at ? String(record.received_at) : change.created_at,
+            synced: true,
+          });
+        }
+
+        // The server sends the on-hand each line landed at, so we don't have to ask for it.
+        const onHand = parseQuantity(line?.on_hand);
+        if (onHand !== null && location_id) {
+          await snapshotsSet({ variant_id, location_id, quantity: onHand, updated_at: change.created_at });
+        }
+      }
+
+      // The receipt is what settled the order's status, and it travels with it.
+      const settled = record?.purchase_order?.status;
+      if (settled) await ordersSetStatus(purchase_order_id, String(settled), change.created_at);
       continue;
     }
 

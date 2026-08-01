@@ -32,9 +32,15 @@ module Api
         require_permission!("purchasing.read")
         return if performed?
 
-        receipts = PurchaseReceipt.where(org_id: current_organization.id).order(created_at: :desc)
+        # Lines come with the index because this is the offline client's bootstrap read: it totals
+        # them against the order to know what is still outstanding, and fetching them per receipt
+        # would be one request each. Same call as the purchase-order index.
+        receipts = PurchaseReceipt
+          .where(org_id: current_organization.id)
+          .includes(:purchase_receipt_items)
+          .order(created_at: :desc)
         receipts = receipts.where(purchase_order_id: params[:purchase_order_id]) if params[:purchase_order_id].present?
-        render json: { purchase_receipts: receipts.limit(200).map { |r| receipt_payload(r) } }
+        render json: { purchase_receipts: receipts.limit(200).map { |r| receipt_payload(r, include_lines: true) } }
       end
 
       def show
@@ -77,13 +83,17 @@ module Api
           .symbolize_keys
       end
 
-      def receipt_payload(receipt, include_items: false)
+      # `include_items` is the rich form — per-line movement and on-hand — for the caller that
+      # just moved the stock. `include_lines` is the plain form the index uses.
+      def receipt_payload(receipt, include_items: false, include_lines: false)
         payload = receipt.slice(:id, :org_id, :purchase_order_id, :received_at, :received_by, :created_at, :idempotency_key)
         if include_items
           payload[:items] = Purchasing::ReceiptLines.payload(receipt)
           # The receipt is what settled the order's status, so callers do not need a second
           # request to find out what it settled on.
           payload[:purchase_order_status] = receipt.purchase_order.status
+        elsif include_lines
+          payload[:items] = Purchasing::ReceiptLines.summary(receipt)
         end
         payload
       end
