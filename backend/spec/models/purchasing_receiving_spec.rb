@@ -212,6 +212,33 @@ RSpec.describe Purchasing::ReceiveOrder, type: :model do
         .to raise_error(Purchasing::OrderLifecycle::InvalidTransition, /that is cancelled/)
     end
 
+    # Once the last line has landed there is nothing left to book in, and the order says so.
+    it "refuses to receive against an order that is already fully received" do
+      variant = create_variant!(sku: "SKU-1")
+      order = approved_order!(items: [{ variant_id: variant.id, quantity_ordered: "2", unit_cost: "1" }])
+      receive!(order, items: [{ variant_id: variant.id, quantity_received: "2" }])
+      expect(order.reload.status).to eq("received")
+
+      expect { receive!(order, items: [{ variant_id: variant.id, quantity_received: "1" }]) }
+        .to raise_error(Purchasing::OrderLifecycle::InvalidTransition, /that is received/)
+      expect(on_hand(variant)).to eq(2.to_d)
+    end
+
+    # A short delivery is short-closed rather than cancelled — the ledger holds movements a status
+    # change cannot undo — and closing ends the order for receiving too.
+    it "refuses to receive against an order that was short-closed" do
+      variant = create_variant!(sku: "SKU-1")
+      order = approved_order!(items: [{ variant_id: variant.id, quantity_ordered: "10", unit_cost: "1" }])
+      receive!(order, items: [{ variant_id: variant.id, quantity_received: "3" }])
+      # ReceiveOrder settles the status on its own instance, so this one is stale until reloaded.
+      expect(order.reload.status).to eq("partially_received")
+      Purchasing::TransitionOrder.call(order: order, to: "closed")
+
+      expect { receive!(order, items: [{ variant_id: variant.id, quantity_received: "1" }]) }
+        .to raise_error(Purchasing::OrderLifecycle::InvalidTransition, /that is closed/)
+      expect(on_hand(variant)).to eq(3.to_d)
+    end
+
     it "refuses a line for a variant that is not on the order" do
       ordered = create_variant!(sku: "SKU-ORDERED")
       other = create_variant!(sku: "SKU-OTHER")

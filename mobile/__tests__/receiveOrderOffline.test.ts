@@ -3,7 +3,7 @@ import { Platform } from "react-native";
 import { movementsListUnsynced } from "@/inventory/movements";
 import { ordersGetById, ordersUpsert } from "@/purchasing/orders";
 import { parseReceiptLines, receiptsListForOrder } from "@/purchasing/receipts";
-import { receiveOrderOffline } from "@/sync/syncEngine";
+import { receiveOrderOffline, transitionPurchaseOrderOffline } from "@/sync/syncEngine";
 
 const SUPPLIER = "11111111-1111-4111-8111-111111111111";
 const LOCATION = "22222222-2222-4222-8222-222222222222";
@@ -191,6 +191,40 @@ describe("receiving goods offline (web mode)", () => {
     expect(movements).toHaveLength(2);
     expect(movements.every((m) => m.location_id === LOCATION && m.type === "purchase")).toBe(true);
     expect((await ordersGetById(ORDER))?.status).toBe("partially_received");
+  });
+
+  /**
+   * The whole point of the outstanding calculation: the last delivery closes the order out, and
+   * a device that then tries to receive again has nothing left to book in.
+   */
+  test("the final delivery completes the order and nothing can be received after it", async () => {
+    await seedApprovedOrder();
+    await receiveOrderOffline({ purchase_order_id: ORDER, items: [{ variant_id: VARIANT, quantity_received: "6" }] });
+
+    await receiveOrderOffline({ purchase_order_id: ORDER, items: [{ variant_id: VARIANT, quantity_received: "4" }] });
+    expect((await ordersGetById(ORDER))?.status).toBe("received");
+
+    await expect(
+      receiveOrderOffline({ purchase_order_id: ORDER, items: [{ variant_id: VARIANT, quantity_received: "1" }] })
+    ).rejects.toThrow("Cannot receive against a purchase order that is received");
+    expect(await receiptsListForOrder(ORDER)).toHaveLength(2);
+  });
+
+  /**
+   * A short delivery is short-closed rather than cancelled: the ledger holds movements a status
+   * change cannot undo. Closing stays an operator's decision, so it is a normal transition.
+   */
+  test("a partly delivered order can be short-closed", async () => {
+    await seedApprovedOrder();
+    await receiveOrderOffline({ purchase_order_id: ORDER, items: [{ variant_id: VARIANT, quantity_received: "3" }] });
+
+    await transitionPurchaseOrderOffline({ id: ORDER, status: "closed" });
+
+    expect((await ordersGetById(ORDER))?.status).toBe("closed");
+    // Nothing more can be booked in against it.
+    await expect(
+      receiveOrderOffline({ purchase_order_id: ORDER, items: [{ variant_id: VARIANT, quantity_received: "1" }] })
+    ).rejects.toThrow("Cannot receive against a purchase order that is closed");
   });
 
   test("receiving an order this device has never seen is refused", async () => {

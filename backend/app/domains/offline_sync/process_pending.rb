@@ -97,6 +97,10 @@ module OfflineSync
         return apply_purchase_receipt(item)
       end
 
+      if item.entity == "sale"
+        return apply_sale(item)
+      end
+
       { status: "applied", entity_id: nil, record: nil, error: nil }
     rescue StandardError => e
       { status: "failed", entity_id: nil, record: nil, error: e.message }
@@ -883,6 +887,69 @@ module OfflineSync
         # The receipt is what settled the order's status, so it travels with it — the client
         # folds the new status onto its own purchase-order row without a second round trip.
         purchase_order: { id: order.id, status: order.status, location_id: order.location_id }
+      }
+    end
+
+    # A sale decrements stock, so like a receipt it can only ever be created. Undoing one is a
+    # void (Sprint G), which writes compensating movements rather than editing history.
+    def apply_sale(item)
+      payload = normalize_hash(item.payload)
+      org_id = item.org_id
+
+      unless item.operation == "create"
+        return {
+          status: "failed",
+          entity_id: fetch_key(payload, :id),
+          record: payload,
+          error: "Sales are immutable: #{item.operation} is not supported"
+        }
+      end
+
+      sale = Sales::CreateSale.call(
+        org_id: org_id,
+        id: fetch_key(payload, :id).presence,
+        location_id: fetch_key(payload, :location_id),
+        sold_at: fetch_key(payload, :sold_at),
+        items: fetch_key(payload, :items),
+        payments: fetch_key(payload, :payments),
+        cashier_id: actor_id(org_id, fetch_key(payload, :cashier_id)),
+        idempotency_key: item.idempotency_key
+      )
+
+      { status: "applied", entity_id: sale.id, record: sale_record(sale), error: nil }
+    rescue StandardError => e
+      { status: "failed", entity_id: fetch_key(payload, :id), record: payload, error: e.message }
+    end
+
+    def sale_record(sale)
+      # Indexed by idempotency_key, not variant_id: a cart may hold the same item on two lines,
+      # and each line has its own movement.
+      movements = InventoryMovement
+        .where(org_id: sale.org_id, reference_type: "Sale", reference_id: sale.id)
+        .index_by(&:idempotency_key)
+
+      {
+        id: sale.id,
+        location_id: sale.location_id,
+        cashier_id: sale.cashier_id,
+        status: sale.status,
+        # decimals as strings so the client's JSON parse cannot round them
+        subtotal: sale.subtotal.to_s,
+        discount: sale.discount.to_s,
+        tax: sale.tax.to_s,
+        total_amount: sale.total_amount.to_s,
+        sold_at: sale.sold_at&.iso8601(6),
+        items: Sales::SaleLines.payload(sale).map do |line|
+          # so the pull feed can refresh on-hand without a second round trip, the way an
+          # adjustment's and a receipt's change records do
+          line.merge(
+            on_hand: Inventory::OnHand.for(
+              org_id: sale.org_id, variant_id: line.fetch(:variant_id), location_id: sale.location_id
+            ).to_s,
+            movement_id: movements["sale:#{sale.id}:#{line.fetch(:id)}"]&.id
+          )
+        end,
+        payments: Sales::SalePayments.payload(sale)
       }
     end
 

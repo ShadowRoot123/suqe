@@ -179,10 +179,15 @@ RSpec.describe "OfflineSync", type: :request do
     token = org_body.fetch("access_token")
     org_id = org_body.dig("organization", "id")
 
+    # A command that really applies. This used to push `entity: "sale"` with a nonsense payload,
+    # which only came back "applied" because `sale` was an entity the pipeline did not handle yet
+    # and unknown entities fall through to a no-op success — so the test passed for the wrong
+    # reason, and started failing the moment sales became real.
     post "/api/v1/sync/push", params: {
       device_id: "device-1",
       commands: [
-        { idempotency_key: "cmd-1", entity: "sale", operation: "create", payload: { foo: "bar" } }
+        { idempotency_key: "cmd-1", entity: "category", operation: "create",
+          payload: { id: SecureRandom.uuid, name: "Drinks" } }
       ]
     }, headers: auth_headers(token), as: :json
     expect(response).to have_http_status(:ok)
@@ -2050,6 +2055,205 @@ RSpec.describe "OfflineSync", type: :request do
       expect(PurchaseReceipt.where(purchase_order_id: ids[:order]).count).to eq(0)
       expect(PurchaseOrder.find(ids[:order]).status).to eq("approved")
       expect(on_hand(org_id, ids)).to eq(0)
+    end
+  end
+
+  describe "sales" do
+    def push!(token, commands)
+      post "/api/v1/sync/push", params: { device_id: "till-1", commands: commands },
+                                headers: auth_headers(token), as: :json
+      expect(response).to have_http_status(:ok)
+    end
+
+    def push_sale!(token, key:, payload:, operation: "create")
+      push!(token, [{ idempotency_key: key, entity: "sale", operation: operation, payload: payload }])
+    end
+
+    # A shop with something to sell and stock to sell it from, all built through the pipeline.
+    def start!
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+      ids = {
+        location: SecureRandom.uuid, product: SecureRandom.uuid,
+        variant: SecureRandom.uuid, other_variant: SecureRandom.uuid
+      }
+
+      push!(token, [
+        { idempotency_key: "l-1", entity: "location", operation: "create",
+          payload: { id: ids[:location], name: "Shop" } },
+        { idempotency_key: "p-1", entity: "product", operation: "create",
+          payload: { id: ids[:product], name: "Cola" } },
+        { idempotency_key: "v-1", entity: "variant", operation: "create",
+          payload: { id: ids[:variant], product_id: ids[:product], sku: "COLA-#{ids[:variant][0, 8]}" } },
+        { idempotency_key: "v-2", entity: "variant", operation: "create",
+          payload: { id: ids[:other_variant], product_id: ids[:product], sku: "FANTA-#{ids[:other_variant][0, 8]}" } },
+        { idempotency_key: "adj-1", entity: "inventory_adjustment", operation: "create",
+          payload: { id: SecureRandom.uuid, variant_id: ids[:variant], location_id: ids[:location],
+                     quantity_delta: "20", reason: "Opening" } }
+      ])
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      [token, org_id, ids]
+    end
+
+    def on_hand(org_id, ids)
+      Inventory::OnHand.for(org_id: org_id, variant_id: ids[:variant], location_id: ids[:location])
+    end
+
+    it "finalises an offline sale, decrements stock and echoes the totals it derived" do
+      token, org_id, ids = start!
+      sale_id = SecureRandom.uuid
+      line_id = SecureRandom.uuid
+
+      push_sale!(token, key: "sale-1", payload: {
+        id: sale_id, location_id: ids[:location], sold_at: "2026-08-01T09:30:00Z",
+        items: [{ id: line_id, variant_id: ids[:variant], quantity: "3", unit_price: "2.50", tax: "0.50" }],
+        payments: [{ method: "cash", amount: "8.00" }]
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      sale = Sale.find_by(org_id: org_id, id: sale_id)
+      expect(sale).to be_present
+      expect(sale.total_amount).to eq(8.to_d)
+      expect(on_hand(org_id, ids)).to eq(17.to_d)
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      body = JSON.parse(response.body)
+      expect(body.fetch("acks")).to include(a_hash_including("idempotency_key" => "sale-1", "status" => "applied"))
+      expect(body.fetch("changes")).to include(
+        a_hash_including(
+          "entity" => "sale",
+          "entity_id" => sale_id,
+          "metadata" => a_hash_including(
+            "record" => a_hash_including(
+              "status" => "completed",
+              "subtotal" => "7.5",
+              "tax" => "0.5",
+              "total_amount" => "8.0",
+              # the on-hand each line landed at rides along, so the till does not have to ask
+              "items" => [a_hash_including("id" => line_id, "quantity" => "3.0", "on_hand" => "17.0")],
+              "payments" => [a_hash_including("method" => "cash", "amount" => "8.0")]
+            )
+          )
+        )
+      )
+    end
+
+    # The mandatory replay test for a command that touches inventory and money: the same sale
+    # arriving under a second outbox row must not sell the goods twice.
+    it "replays a sale without decrementing stock again" do
+      token, org_id, ids = start!
+      sale_id = SecureRandom.uuid
+      payload = {
+        id: sale_id, location_id: ids[:location],
+        items: [{ variant_id: ids[:variant], quantity: "5", unit_price: "1.00" }],
+        payments: [{ method: "cash", amount: "5.00" }]
+      }
+
+      push_sale!(token, key: "sale-1", payload: payload)
+      OfflineSync::ProcessPending.call(org_id: org_id)
+      # A different key so push does not dedupe it: this is the handler's own replay guard.
+      push_sale!(token, key: "sale-1-again", payload: payload)
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(Sale.where(org_id: org_id).count).to eq(1)
+      expect(SaleItem.where(sale_id: sale_id).count).to eq(1)
+      expect(Payment.where(sale_id: sale_id).count).to eq(1)
+      expect(InventoryMovement.where(org_id: org_id, type: "sale").count).to eq(1)
+      expect(on_hand(org_id, ids)).to eq(15.to_d)
+    end
+
+    it "fails a sale whose payments do not add up, and leaves the stock alone" do
+      token, org_id, ids = start!
+
+      push_sale!(token, key: "sale-short", payload: {
+        id: SecureRandom.uuid, location_id: ids[:location],
+        items: [{ variant_id: ids[:variant], quantity: "2", unit_price: "5.00" }],
+        payments: [{ method: "cash", amount: "9.00" }]
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(Sale.where(org_id: org_id).count).to eq(0)
+      expect(on_hand(org_id, ids)).to eq(20.to_d)
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      body = JSON.parse(response.body)
+      expect(body.fetch("acks")).to include(a_hash_including("idempotency_key" => "sale-short", "status" => "failed"))
+      expect(body.fetch("changes")).to include(
+        a_hash_including(
+          "entity" => "sale",
+          "metadata" => a_hash_including("error" => a_string_matching(/10.00 due, 9.00 paid/))
+        )
+      )
+    end
+
+    it "fails a sale of an archived product" do
+      token, org_id, ids = start!
+      push!(token, [{ idempotency_key: "arch-1", entity: "product", operation: "update",
+                      payload: { id: ids[:product], status: "archived" } }])
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      push_sale!(token, key: "sale-archived", payload: {
+        id: SecureRandom.uuid, location_id: ids[:location],
+        items: [{ variant_id: ids[:variant], quantity: "1", unit_price: "1.00" }],
+        payments: [{ method: "cash", amount: "1.00" }]
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(Sale.where(org_id: org_id).count).to eq(0)
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      expect(JSON.parse(response.body).fetch("changes")).to include(
+        a_hash_including("metadata" => a_hash_including("error" => a_string_matching(/archived and cannot be sold/)))
+      )
+    end
+
+    # Undoing a sale is a void (Sprint G), which writes compensating movements rather than
+    # editing history.
+    it "refuses to update or delete a sale" do
+      token, org_id, ids = start!
+      sale_id = SecureRandom.uuid
+
+      push_sale!(token, key: "sale-1", payload: {
+        id: sale_id, location_id: ids[:location],
+        items: [{ variant_id: ids[:variant], quantity: "1", unit_price: "1.00" }],
+        payments: [{ method: "cash", amount: "1.00" }]
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      push_sale!(token, key: "sale-update", operation: "update", payload: { id: sale_id })
+      push_sale!(token, key: "sale-delete", operation: "delete", payload: { id: sale_id })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(Sale.find_by(org_id: org_id, id: sale_id)).to be_present
+      expect(on_hand(org_id, ids)).to eq(19.to_d)
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      acks = JSON.parse(response.body).fetch("acks")
+      %w[sale-update sale-delete].each do |key|
+        expect(acks).to include(a_hash_including("idempotency_key" => key, "status" => "failed"))
+      end
+    end
+
+    it "does not sell another org's stock" do
+      _token, org_id, ids = start!
+
+      post "/api/v1/orgs", params: {
+        name: "Other Shop",
+        owner: { name: "Other", email: "other@example.com", password: "secret123" }
+      }, as: :json
+      org_b = JSON.parse(response.body)
+
+      push_sale!(org_b.fetch("access_token"), key: "sale-x", payload: {
+        id: SecureRandom.uuid, location_id: ids[:location],
+        items: [{ variant_id: ids[:variant], quantity: "1", unit_price: "1.00" }],
+        payments: [{ method: "cash", amount: "1.00" }]
+      })
+      OfflineSync::ProcessPending.call(org_id: org_b.dig("organization", "id"))
+
+      expect(Sale.where(org_id: org_b.dig("organization", "id")).count).to eq(0)
+      expect(on_hand(org_id, ids)).to eq(20.to_d)
     end
   end
 
