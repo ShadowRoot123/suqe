@@ -11,7 +11,8 @@ import { calendarDate } from "@/purchasing/lib/calendarDate";
 import { formatMoney, lineTotal, moneyOrZero } from "@/purchasing/lib/money";
 import {
   isEditable,
-  nextStatuses,
+  isReceivable,
+  manualStatuses,
   STATUS_LABEL,
   STATUS_TONE,
   type OrderStatus,
@@ -34,7 +35,10 @@ type DetailLine = {
   line_total: string;
 };
 
-/** What each onward status is called on a button, rather than as a state. */
+/**
+ * What each onward status is called on a button, rather than as a state. The two receiving
+ * statuses have no button: an order gets there by goods arriving, not by being told they did.
+ */
 const ACTION_LABEL: Record<OrderStatus, string> = {
   draft: "Back to draft",
   approved: "Approve and send",
@@ -153,8 +157,9 @@ export default function PurchaseOrderDetailScreen() {
     );
   }
 
-  const onward = nextStatuses(order.status);
+  const onward = manualStatuses(order.status);
   const editable = isEditable(order.status);
+  const receivable = isReceivable(order.status);
 
   return (
     <Screen scroll>
@@ -236,6 +241,12 @@ export default function PurchaseOrderDetailScreen() {
                     <AppText muted>
                       Approving sends the order to the supplier and locks its lines, because deliveries are checked
                       against them.
+                    </AppText>
+                  ) : null}
+                  {receivable ? (
+                    <AppText muted>
+                      This order is waiting on the supplier. It becomes received when the goods are booked in against
+                      it — that is what moves stock, so the status is never set by hand.
                     </AppText>
                   ) : null}
                   {onward.map((status) => (

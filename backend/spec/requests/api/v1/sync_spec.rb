@@ -1800,6 +1800,257 @@ RSpec.describe "OfflineSync", type: :request do
       expect(PurchaseOrder.find(order_id).status).to eq("draft")
       expect(PurchaseOrder.where(org_id: org_b.dig("organization", "id")).count).to eq(0)
     end
+
+    # Receiving is the only thing allowed to move an order into a receiving status, so the
+    # transitions the device used to be able to ask for directly now have to fail.
+    it "refuses a status-only command that claims goods arrived" do
+      token, org_id, ids = start!
+      order_id = SecureRandom.uuid
+
+      push_order!(token, key: "po-1", payload: {
+        id: order_id, supplier_id: ids[:supplier], location_id: ids[:location],
+        items: [{ variant_id: ids[:variant], quantity_ordered: "5", unit_cost: "1" }]
+      })
+      push_order!(token, key: "po-approve", operation: "update", payload: { id: order_id, status: "approved" })
+      push_order!(token, key: "po-claim", operation: "update", payload: { id: order_id, status: "received" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(PurchaseOrder.find_by(org_id: org_id, id: order_id).status).to eq("approved")
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      body = JSON.parse(response.body)
+      expect(body.fetch("acks")).to include(a_hash_including("idempotency_key" => "po-claim", "status" => "failed"))
+      expect(body.fetch("changes")).to include(
+        a_hash_including("metadata" => a_hash_including("error" => a_string_matching(/by receiving against it/)))
+      )
+    end
+  end
+
+  describe "purchase receipts" do
+    def push!(token, commands)
+      post "/api/v1/sync/push", params: { device_id: "device-1", commands: commands },
+                                headers: auth_headers(token), as: :json
+      expect(response).to have_http_status(:ok)
+    end
+
+    def push_receipt!(token, key:, payload:, operation: "create")
+      push!(token, [{ idempotency_key: key, entity: "purchase_receipt", operation: operation, payload: payload }])
+    end
+
+    # A supplier, a delivery location, two variants and an approved order to receive against —
+    # everything built through the pipeline, the way a device would.
+    def start!
+      org_body = create_org!
+      token = org_body.fetch("access_token")
+      org_id = org_body.dig("organization", "id")
+      ids = {
+        supplier: SecureRandom.uuid, location: SecureRandom.uuid, product: SecureRandom.uuid,
+        variant: SecureRandom.uuid, other_variant: SecureRandom.uuid, order: SecureRandom.uuid
+      }
+
+      push!(token, [
+        { idempotency_key: "s-1", entity: "supplier", operation: "create",
+          payload: { id: ids[:supplier], name: "Acme Supply" } },
+        { idempotency_key: "l-1", entity: "location", operation: "create",
+          payload: { id: ids[:location], name: "Dock", type: "warehouse" } },
+        { idempotency_key: "p-1", entity: "product", operation: "create",
+          payload: { id: ids[:product], name: "Cola" } },
+        { idempotency_key: "v-1", entity: "variant", operation: "create",
+          payload: { id: ids[:variant], product_id: ids[:product], sku: "COLA-#{ids[:variant][0, 8]}" } },
+        { idempotency_key: "v-2", entity: "variant", operation: "create",
+          payload: { id: ids[:other_variant], product_id: ids[:product], sku: "FANTA-#{ids[:other_variant][0, 8]}" } },
+        { idempotency_key: "po-1", entity: "purchase_order", operation: "create",
+          payload: { id: ids[:order], supplier_id: ids[:supplier], location_id: ids[:location],
+                     items: [{ variant_id: ids[:variant], quantity_ordered: "10", unit_cost: "2.50" }] } },
+        { idempotency_key: "po-approve", entity: "purchase_order", operation: "update",
+          payload: { id: ids[:order], status: "approved" } }
+      ])
+      OfflineSync::ProcessPending.call(org_id: org_id)
+      expect(PurchaseOrder.find(ids[:order]).status).to eq("approved")
+
+      [token, org_id, ids]
+    end
+
+    def on_hand(org_id, ids)
+      Inventory::OnHand.for(org_id: org_id, variant_id: ids[:variant], location_id: ids[:location])
+    end
+
+    it "books a full delivery into the ledger and marks the order received" do
+      token, org_id, ids = start!
+      receipt_id = SecureRandom.uuid
+
+      push_receipt!(token, key: "rec-1", payload: {
+        id: receipt_id, purchase_order_id: ids[:order], received_at: "2026-08-02T10:00:00Z",
+        items: [{ variant_id: ids[:variant], quantity_received: "10" }]
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      receipt = PurchaseReceipt.find_by(org_id: org_id, id: receipt_id)
+      expect(receipt).to be_present
+      expect(PurchaseOrder.find(ids[:order]).status).to eq("received")
+      expect(on_hand(org_id, ids)).to eq(10.to_d)
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      body = JSON.parse(response.body)
+      expect(body.fetch("acks")).to include(a_hash_including("idempotency_key" => "rec-1", "status" => "applied"))
+      expect(body.fetch("changes")).to include(
+        a_hash_including(
+          "entity" => "purchase_receipt",
+          "entity_id" => receipt_id,
+          "metadata" => a_hash_including(
+            "record" => a_hash_including(
+              "purchase_order_id" => ids[:order],
+              # the order's new status rides along, so the device does not have to ask
+              "purchase_order" => a_hash_including("status" => "received"),
+              "items" => [a_hash_including(
+                "variant_id" => ids[:variant], "quantity_received" => "10.0",
+                # the ordered cost, since the receipt did not name one
+                "unit_cost" => "2.5", "on_hand" => "10.0"
+              )]
+            )
+          )
+        )
+      )
+    end
+
+    it "moves an order through partially received and on to received" do
+      token, org_id, ids = start!
+
+      push_receipt!(token, key: "rec-1", payload: {
+        id: SecureRandom.uuid, purchase_order_id: ids[:order],
+        items: [{ variant_id: ids[:variant], quantity_received: "4" }]
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+      expect(PurchaseOrder.find(ids[:order]).status).to eq("partially_received")
+      expect(on_hand(org_id, ids)).to eq(4.to_d)
+
+      push_receipt!(token, key: "rec-2", payload: {
+        id: SecureRandom.uuid, purchase_order_id: ids[:order],
+        items: [{ variant_id: ids[:variant], quantity_received: "6" }]
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+      expect(PurchaseOrder.find(ids[:order]).status).to eq("received")
+      expect(on_hand(org_id, ids)).to eq(10.to_d)
+    end
+
+    # The mandatory replay test for a command that touches inventory: the same receipt arriving
+    # under a second outbox row must not increment stock twice.
+    it "replays a receipt without booking the goods in again" do
+      token, org_id, ids = start!
+      receipt_id = SecureRandom.uuid
+      payload = {
+        id: receipt_id, purchase_order_id: ids[:order],
+        items: [{ variant_id: ids[:variant], quantity_received: "10" }]
+      }
+
+      push_receipt!(token, key: "rec-1", payload: payload)
+      OfflineSync::ProcessPending.call(org_id: org_id)
+      # A different key so push does not dedupe it: this is the handler's own replay guard.
+      push_receipt!(token, key: "rec-1-again", payload: payload)
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(PurchaseReceipt.where(org_id: org_id).count).to eq(1)
+      expect(PurchaseReceiptItem.where(receipt_id: receipt_id).count).to eq(1)
+      expect(InventoryMovement.where(org_id: org_id, type: "purchase").count).to eq(1)
+      expect(on_hand(org_id, ids)).to eq(10.to_d)
+      expect(PurchaseOrder.find(ids[:order]).status).to eq("received")
+    end
+
+    it "fails a receipt against a draft and leaves the ledger alone" do
+      token, org_id, ids = start!
+      draft_id = SecureRandom.uuid
+
+      push!(token, [{ idempotency_key: "po-draft", entity: "purchase_order", operation: "create",
+                      payload: { id: draft_id, supplier_id: ids[:supplier], location_id: ids[:location],
+                                 items: [{ variant_id: ids[:variant], quantity_ordered: "1", unit_cost: "1" }] } }])
+      push_receipt!(token, key: "rec-draft", payload: {
+        id: SecureRandom.uuid, purchase_order_id: draft_id,
+        items: [{ variant_id: ids[:variant], quantity_received: "1" }]
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(PurchaseReceipt.where(org_id: org_id).count).to eq(0)
+      expect(on_hand(org_id, ids)).to eq(0)
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      body = JSON.parse(response.body)
+      expect(body.fetch("acks")).to include(a_hash_including("idempotency_key" => "rec-draft", "status" => "failed"))
+      expect(body.fetch("changes")).to include(
+        a_hash_including(
+          "entity" => "purchase_receipt",
+          "metadata" => a_hash_including("error" => a_string_matching(/that is draft/))
+        )
+      )
+    end
+
+    it "fails a receipt for more than was ordered, or for a variant nobody ordered" do
+      token, org_id, ids = start!
+
+      push_receipt!(token, key: "rec-over", payload: {
+        id: SecureRandom.uuid, purchase_order_id: ids[:order],
+        items: [{ variant_id: ids[:variant], quantity_received: "11" }]
+      })
+      push_receipt!(token, key: "rec-stranger", payload: {
+        id: SecureRandom.uuid, purchase_order_id: ids[:order],
+        items: [{ variant_id: ids[:other_variant], quantity_received: "1" }]
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(PurchaseReceipt.where(org_id: org_id).count).to eq(0)
+      expect(on_hand(org_id, ids)).to eq(0)
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      acks = JSON.parse(response.body).fetch("acks")
+      %w[rec-over rec-stranger].each do |key|
+        expect(acks).to include(a_hash_including("idempotency_key" => key, "status" => "failed"))
+      end
+    end
+
+    # Correcting a mis-received quantity is an inventory adjustment; the receipt itself is
+    # history, like the movements it wrote.
+    it "refuses to update or delete a receipt" do
+      token, org_id, ids = start!
+      receipt_id = SecureRandom.uuid
+
+      push_receipt!(token, key: "rec-1", payload: {
+        id: receipt_id, purchase_order_id: ids[:order],
+        items: [{ variant_id: ids[:variant], quantity_received: "10" }]
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      push_receipt!(token, key: "rec-update", operation: "update", payload: { id: receipt_id })
+      push_receipt!(token, key: "rec-delete", operation: "delete", payload: { id: receipt_id })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(PurchaseReceipt.find_by(org_id: org_id, id: receipt_id)).to be_present
+      expect(on_hand(org_id, ids)).to eq(10.to_d)
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      acks = JSON.parse(response.body).fetch("acks")
+      %w[rec-update rec-delete].each do |key|
+        expect(acks).to include(a_hash_including("idempotency_key" => key, "status" => "failed"))
+      end
+    end
+
+    it "does not receive against another org's order" do
+      _token, org_id, ids = start!
+
+      post "/api/v1/orgs", params: {
+        name: "Other Shop",
+        owner: { name: "Other", email: "other@example.com", password: "secret123" }
+      }, as: :json
+      org_b = JSON.parse(response.body)
+
+      push_receipt!(org_b.fetch("access_token"), key: "rec-x", payload: {
+        id: SecureRandom.uuid, purchase_order_id: ids[:order],
+        items: [{ variant_id: ids[:variant], quantity_received: "1" }]
+      })
+      OfflineSync::ProcessPending.call(org_id: org_b.dig("organization", "id"))
+
+      expect(PurchaseReceipt.where(purchase_order_id: ids[:order]).count).to eq(0)
+      expect(PurchaseOrder.find(ids[:order]).status).to eq("approved")
+      expect(on_hand(org_id, ids)).to eq(0)
+    end
   end
 
   it "marks variant create as failed when missing sku" do

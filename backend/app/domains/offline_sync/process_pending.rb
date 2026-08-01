@@ -93,6 +93,10 @@ module OfflineSync
         return apply_purchase_order(item)
       end
 
+      if item.entity == "purchase_receipt"
+        return apply_purchase_receipt(item)
+      end
+
       { status: "applied", entity_id: nil, record: nil, error: nil }
     rescue StandardError => e
       { status: "failed", entity_id: nil, record: nil, error: e.message }
@@ -836,6 +840,52 @@ module OfflineSync
       attrs
     end
 
+    # Receiving moves stock, so like an inventory adjustment a receipt can only ever be created:
+    # an update would have to unwind ledger entries. Correcting a mis-received quantity is an
+    # inventory adjustment, which is exactly what it is.
+    def apply_purchase_receipt(item)
+      payload = normalize_hash(item.payload)
+      org_id = item.org_id
+
+      unless item.operation == "create"
+        return {
+          status: "failed",
+          entity_id: fetch_key(payload, :id),
+          record: payload,
+          error: "Purchase receipts are immutable: #{item.operation} is not supported"
+        }
+      end
+
+      receipt = Purchasing::ReceiveOrder.call(
+        org_id: org_id,
+        id: fetch_key(payload, :id).presence,
+        purchase_order_id: fetch_key(payload, :purchase_order_id),
+        received_at: fetch_key(payload, :received_at),
+        items: fetch_key(payload, :items),
+        received_by: actor_id(org_id, fetch_key(payload, :received_by)),
+        idempotency_key: item.idempotency_key
+      )
+
+      { status: "applied", entity_id: receipt.id, record: purchase_receipt_record(receipt), error: nil }
+    rescue StandardError => e
+      { status: "failed", entity_id: fetch_key(payload, :id), record: payload, error: e.message }
+    end
+
+    def purchase_receipt_record(receipt)
+      order = receipt.purchase_order
+
+      {
+        id: receipt.id,
+        purchase_order_id: receipt.purchase_order_id,
+        received_at: receipt.received_at&.iso8601(6),
+        received_by: receipt.received_by,
+        items: Purchasing::ReceiptLines.payload(receipt),
+        # The receipt is what settled the order's status, so it travels with it — the client
+        # folds the new status onto its own purchase-order row without a second round trip.
+        purchase_order: { id: order.id, status: order.status, location_id: order.location_id }
+      }
+    end
+
     def supplier_record(supplier)
       {
         id: supplier.id,
@@ -859,27 +909,8 @@ module OfflineSync
       }
     end
 
-    # A datetime column casts garbage to nil, which would silently clear an expected delivery
-    # date on a typo, so an unparseable value has to fail the command instead.
-    #
-    # Strictly ISO 8601, and not Time.zone.parse, which is lenient enough to pull a weekday out
-    # of prose ("next tuesday-ish" becomes a real date) — the client sends the same format the
-    # change feed emits, so anything else is a bug worth reporting. A date with no time is
-    # accepted because an expected-delivery picker has no reason to carry one.
     def parse_time(value, field:)
-      return nil if value.nil? || value.to_s.strip.empty?
-      return value if value.is_a?(Time) || value.is_a?(DateTime)
-
-      raw = value.to_s.strip
-      begin
-        Time.iso8601(raw)
-      rescue ArgumentError
-        begin
-          Time.zone.parse(Date.iso8601(raw).to_s)
-        rescue ArgumentError
-          raise ArgumentError, "#{field} must be an ISO 8601 date"
-        end
-      end
+      Iso8601Time.parse(value, field: field)
     end
 
     # Commands carry no session, so the client tells us who acted; ignore anyone outside the org.

@@ -62,6 +62,14 @@ RSpec.describe "Purchasing", type: :request do
     purchase_order_id = purchase_order.fetch("id")
     expect(purchase_order.fetch("items").length).to eq(1)
 
+    # Goods can only be received against an order the supplier has been sent, so the order is
+    # approved first — receiving used to walk a draft straight to `received`.
+    patch "/api/v1/purchase_orders/#{purchase_order_id}",
+          params: { purchase_order: { status: "approved" } },
+          headers: auth,
+          as: :json
+    expect(response).to have_http_status(:ok)
+
     post "/api/v1/purchase_receipts",
          params: {
            purchase_receipt: {
@@ -227,6 +235,124 @@ RSpec.describe "Purchasing", type: :request do
       expect(response).to have_http_status(:conflict)
       expect(JSON.parse(response.body).fetch("code")).to eq("invalid_foreign_key")
       expect(Supplier.find_by(id: session[:supplier].id)).to be_present
+    end
+  end
+
+  # This controller used to set the order's status itself and hand-roll the snapshot upsert,
+  # which let it walk a draft straight to `received`. It now goes through the same
+  # Purchasing::ReceiveOrder the sync pipeline uses.
+  describe "receiving over REST" do
+    def start_session!
+      session = create_org_and_get_token!(permission_keys: permission_keys)
+      org_id = session.fetch(:org_id)
+      product = Product.create!(org_id: org_id, name: "Coffee")
+      variant = Variant.create!(org_id: org_id, product_id: product.id, sku: "SKU-RECV-1", attrs: {})
+      location = Location.create!(org_id: org_id, name: "Dock", type: "warehouse")
+      order = Purchasing::CreateOrder.call(
+        org_id: org_id,
+        supplier_id: Supplier.create!(org_id: org_id, name: "Acme").id,
+        location_id: location.id,
+        items: [{ variant_id: variant.id, quantity_ordered: "10", unit_cost: "2.50" }]
+      )
+
+      { auth: auth_headers(session.fetch(:token)), org_id: org_id, variant: variant,
+        location: location, order: order }
+    end
+
+    def post_receipt!(session, items:, **overrides)
+      body = { purchase_order_id: session[:order].id, items: items }.merge(overrides)
+      post "/api/v1/purchase_receipts", params: { purchase_receipt: body }, headers: session[:auth], as: :json
+      JSON.parse(response.body)
+    end
+
+    def approve!(session)
+      Purchasing::TransitionOrder.call(order: session[:order], to: "approved")
+    end
+
+    def on_hand(session)
+      Inventory::OnHand.for(
+        org_id: session[:org_id], variant_id: session[:variant].id, location_id: session[:location].id
+      )
+    end
+
+    it "books the delivery into the ledger and reports the status it settled on" do
+      session = start_session!
+      approve!(session)
+
+      body = post_receipt!(session, items: [{ variant_id: session[:variant].id, quantity_received: "10" }])
+
+      expect(response).to have_http_status(:created)
+      expect(body.dig("purchase_receipt", "purchase_order_status")).to eq("received")
+      expect(body.dig("purchase_receipt", "items").first).to include(
+        "quantity_received" => "10.0", "unit_cost" => "2.5", "on_hand" => "10.0"
+      )
+      expect(session[:order].reload.status).to eq("received")
+      expect(on_hand(session)).to eq(10.to_d)
+    end
+
+    it "leaves a partly delivered order partially received" do
+      session = start_session!
+      approve!(session)
+
+      body = post_receipt!(session, items: [{ variant_id: session[:variant].id, quantity_received: "4" }])
+
+      expect(response).to have_http_status(:created)
+      expect(body.dig("purchase_receipt", "purchase_order_status")).to eq("partially_received")
+      expect(on_hand(session)).to eq(4.to_d)
+    end
+
+    it "refuses to receive against a draft" do
+      session = start_session!
+
+      body = post_receipt!(session, items: [{ variant_id: session[:variant].id, quantity_received: "1" }])
+
+      expect(response).to have_http_status(:conflict)
+      expect(body.fetch("code")).to eq("invalid_transition")
+      expect(session[:order].reload.status).to eq("draft")
+      expect(on_hand(session)).to eq(0)
+    end
+
+    it "refuses more than was ordered" do
+      session = start_session!
+      approve!(session)
+
+      body = post_receipt!(session, items: [{ variant_id: session[:variant].id, quantity_received: "11" }])
+
+      expect(response).to have_http_status(:unprocessable_entity)
+      expect(body.fetch("message")).to match(/Cannot receive more than ordered/)
+      expect(on_hand(session)).to eq(0)
+    end
+
+    it "rejects a receipt for an order that is not in the org" do
+      session = start_session!
+      rival = Organization.create!(name: "Rival")
+      rival_supplier = Supplier.create!(org_id: rival.id, name: "Rival Supply")
+      rival_location = Location.create!(org_id: rival.id, name: "Rival Dock", type: "warehouse")
+      rival_order = Purchasing::CreateOrder.call(
+        org_id: rival.id, supplier_id: rival_supplier.id, location_id: rival_location.id
+      )
+
+      post "/api/v1/purchase_receipts",
+           params: { purchase_receipt: { purchase_order_id: rival_order.id,
+                                         items: [{ variant_id: session[:variant].id, quantity_received: "1" }] } },
+           headers: session[:auth], as: :json
+
+      expect(response).to have_http_status(:unprocessable_entity)
+      expect(JSON.parse(response.body).fetch("code")).to eq("invalid_purchase_order")
+    end
+
+    # Same idempotency key twice is how a retried request announces itself.
+    it "returns the original receipt when the same idempotency key is sent twice" do
+      session = start_session!
+      approve!(session)
+      items = [{ variant_id: session[:variant].id, quantity_received: "10" }]
+
+      first = post_receipt!(session, items: items, idempotency_key: "retry-1")
+      second = post_receipt!(session, items: items, idempotency_key: "retry-1")
+
+      expect(second.dig("purchase_receipt", "id")).to eq(first.dig("purchase_receipt", "id"))
+      expect(PurchaseReceipt.where(org_id: session[:org_id]).count).to eq(1)
+      expect(on_hand(session)).to eq(10.to_d)
     end
   end
 end

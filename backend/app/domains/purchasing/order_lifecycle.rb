@@ -31,6 +31,15 @@ module Purchasing
     # silently redefine what "fully received" means.
     EDITABLE_STATUSES = %w[draft].freeze
 
+    # Statuses a receipt can be written against: the order has gone out, and not everything has
+    # landed yet.
+    RECEIVABLE_STATUSES = %w[approved partially_received].freeze
+
+    # Statuses that are a *summary of the receipts*, never a choice. Setting one by hand would
+    # claim stock arrived without a movement behind it, leaving the order saying "received"
+    # while on-hand never moved — so ReceiveOrder is the only thing allowed to ask for these.
+    RECEIPT_DRIVEN_STATUSES = %w[partially_received received].freeze
+
     class << self
       def status?(status)
         STATUSES.include?(normalize(status))
@@ -42,6 +51,14 @@ module Purchasing
 
       def editable?(status)
         EDITABLE_STATUSES.include?(normalize(status))
+      end
+
+      def receivable?(status)
+        RECEIVABLE_STATUSES.include?(normalize(status))
+      end
+
+      def receipt_driven?(status)
+        RECEIPT_DRIVEN_STATUSES.include?(normalize(status))
       end
 
       def next_statuses(status)

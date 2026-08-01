@@ -28,6 +28,16 @@ const TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
 /** Only a draft's lines are editable — past that, receipts are matched against them. */
 const EDITABLE_STATUSES: OrderStatus[] = ["draft"];
 
+/** An order can be received against once it has gone out, and while something is outstanding. */
+const RECEIVABLE_STATUSES: OrderStatus[] = ["approved", "partially_received"];
+
+/**
+ * Statuses that summarise the receipts rather than being a choice. Setting one by hand would
+ * claim stock arrived with no movement behind it, so the server refuses it and the UI does not
+ * offer it — you get here by receiving goods.
+ */
+const RECEIPT_DRIVEN_STATUSES: OrderStatus[] = ["partially_received", "received"];
+
 export const STATUS_LABEL: Record<OrderStatus, string> = {
   draft: "Draft",
   approved: "Approved",
@@ -68,6 +78,22 @@ export function isEditable(status: unknown): boolean {
   return EDITABLE_STATUSES.includes(toOrderStatus(status));
 }
 
+export function isReceivable(status: unknown): boolean {
+  return RECEIVABLE_STATUSES.includes(toOrderStatus(status));
+}
+
+export function isReceiptDriven(status: unknown): boolean {
+  return isOrderStatus(status) && RECEIPT_DRIVEN_STATUSES.includes(status);
+}
+
+/**
+ * The statuses a person can actually pick, which is what the detail screen offers as buttons.
+ * The receiving statuses are reached by receiving goods, not by asserting them.
+ */
+export function manualStatuses(status: unknown): OrderStatus[] {
+  return nextStatuses(status).filter((next) => !isReceiptDriven(next));
+}
+
 export function canTransition(from: unknown, to: unknown): boolean {
   return isOrderStatus(to) && nextStatuses(from).includes(to);
 }
@@ -85,6 +111,9 @@ export function transitionError(args: { from: unknown; to: unknown; lineCount: n
   if (!canTransition(from, args.to)) return `Cannot move a purchase order from ${from} to ${args.to}`;
   if (args.to === "approved" && args.lineCount === 0) {
     return "A purchase order needs at least one line before it can be approved";
+  }
+  if (isReceiptDriven(args.to)) {
+    return `A purchase order becomes ${args.to} by receiving against it, not by setting its status`;
   }
 
   return null;

@@ -71,6 +71,24 @@ RSpec.describe "Purchasing order lifecycle", type: :model do
         expect(described_class.editable?(status)).to be(false)
       end
     end
+
+    # An order can only be received against once the supplier has been sent it, and only while
+    # something is still outstanding.
+    it "counts only an order in flight as receivable" do
+      expect(described_class.receivable?("approved")).to be(true)
+      expect(described_class.receivable?("partially_received")).to be(true)
+      %w[draft received closed cancelled].each do |status|
+        expect(described_class.receivable?(status)).to be(false)
+      end
+    end
+
+    it "counts the two receiving statuses as receipt-driven" do
+      expect(described_class.receipt_driven?("partially_received")).to be(true)
+      expect(described_class.receipt_driven?("received")).to be(true)
+      %w[draft approved closed cancelled].each do |status|
+        expect(described_class.receipt_driven?(status)).to be(false)
+      end
+    end
   end
 
   describe Purchasing::CreateOrder do
@@ -286,13 +304,43 @@ RSpec.describe "Purchasing order lifecycle", type: :model do
       variant = create_variant!(sku: "SKU-1")
       order = create_order!(items: [{ variant_id: variant.id, quantity_ordered: "10", unit_cost: "1" }])
 
-      %w[approved partially_received received closed].each do |status|
-        described_class.call(order: order, to: status)
+      described_class.call(order: order, to: "approved")
+      # The two receiving statuses are ReceiveOrder's to set, and it says so.
+      %w[partially_received received].each do |status|
+        described_class.call(order: order, to: status, by_receipt: true)
         expect(order.reload.status).to eq(status)
       end
+      described_class.call(order: order, to: "closed")
+      expect(order.reload.status).to eq("closed")
 
       expect { described_class.call(order: order, to: "cancelled") }
         .to raise_error(Purchasing::OrderLifecycle::InvalidTransition)
+    end
+
+    # Otherwise an order could read "received" with nothing in the ledger behind it — the
+    # status would stop being evidence that the goods arrived.
+    it "refuses to be told an order was received without a receipt behind it" do
+      variant = create_variant!(sku: "SKU-1")
+      order = create_order!(items: [{ variant_id: variant.id, quantity_ordered: "10", unit_cost: "1" }])
+      described_class.call(order: order, to: "approved")
+
+      %w[partially_received received].each do |status|
+        expect { described_class.call(order: order, to: status) }
+          .to raise_error(Purchasing::OrderLifecycle::InvalidTransition, /by receiving against it/)
+        expect(order.reload.status).to eq("approved")
+      end
+    end
+
+    # A short delivery is short-closed, and closing is still an operator's call.
+    it "still lets an operator close or cancel by hand" do
+      variant = create_variant!(sku: "SKU-1")
+      order = create_order!(items: [{ variant_id: variant.id, quantity_ordered: "10", unit_cost: "1" }])
+      described_class.call(order: order, to: "approved")
+      described_class.call(order: order, to: "partially_received", by_receipt: true)
+
+      described_class.call(order: order, to: "closed")
+
+      expect(order.reload.status).to eq("closed")
     end
   end
 end
