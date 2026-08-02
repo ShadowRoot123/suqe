@@ -1,7 +1,7 @@
 require "rails_helper"
 
 RSpec.describe "Sales", type: :request do
-  let(:permission_keys) { %w[pos.sell reports.view catalog.write locations.write inventory.adjust] }
+  let(:permission_keys) { %w[pos.sell pos.void_sale reports.view catalog.write locations.write inventory.adjust] }
 
   before { skip_if_no_db! }
 
@@ -154,6 +154,61 @@ RSpec.describe "Sales", type: :request do
       expect(second.dig("sale", "id")).to eq(first.dig("sale", "id"))
       expect(Sale.where(org_id: session[:org_id]).count).to eq(1)
       expect(on_hand(session)).to eq(8.to_d)
+    end
+
+    # Gated on pos.void_sale rather than pos.sell: undoing a sale after the money has been taken
+    # is a supervisor's call, which is why the two permissions exist separately.
+    it "voids a sale, puts the stock back and leaves the original movements alone" do
+      session = start_session!
+      sold = post_sale!(
+        session,
+        items: [{ variant_id: session[:variant].id, quantity: "3", unit_price: "10.00" }],
+        payments: [{ method: "cash", amount: "30.00" }]
+      )
+      sale_id = sold.dig("sale", "id")
+      expect(on_hand(session)).to eq(7.to_d)
+
+      post "/api/v1/sales/#{sale_id}/void", params: { reason: "Wrong item" }, headers: session[:auth], as: :json
+
+      expect(response).to have_http_status(:ok)
+      expect(JSON.parse(response.body).dig("sale", "status")).to eq("voided")
+      expect(on_hand(session)).to eq(10.to_d)
+      # Both movements survive: goods went out, then came back.
+      expect(InventoryMovement.where(org_id: session[:org_id], reference_type: "Sale", reference_id: sale_id).count)
+        .to eq(2)
+    end
+
+    it "is harmless to void the same sale twice" do
+      session = start_session!
+      sale_id = post_sale!(
+        session,
+        items: [{ variant_id: session[:variant].id, quantity: "2", unit_price: "10.00" }],
+        payments: [{ method: "cash", amount: "20.00" }]
+      ).dig("sale", "id")
+
+      post "/api/v1/sales/#{sale_id}/void", headers: session[:auth], as: :json
+      post "/api/v1/sales/#{sale_id}/void", headers: session[:auth], as: :json
+
+      expect(response).to have_http_status(:ok)
+      expect(on_hand(session)).to eq(10.to_d)
+    end
+
+    it "does not reach another org's sale" do
+      session = start_session!
+      rival = Organization.create!(name: "Rival")
+      rival_location = Location.create!(org_id: rival.id, name: "Rival Shop", type: "shop")
+      rival_product = Product.create!(org_id: rival.id, name: "Rival Coffee")
+      rival_variant = Variant.create!(org_id: rival.id, product_id: rival_product.id, sku: "SKU-RIVAL-V", attrs: {})
+      rival_sale = Sales::CreateSale.call(
+        org_id: rival.id, location_id: rival_location.id,
+        items: [{ variant_id: rival_variant.id, quantity: "1", unit_price: "1.00" }],
+        payments: [{ method: "cash", amount: "1.00" }]
+      )
+
+      post "/api/v1/sales/#{rival_sale.id}/void", headers: session[:auth], as: :json
+
+      expect(response).to have_http_status(:not_found)
+      expect(rival_sale.reload.status).to eq("completed")
     end
 
     it "rejects a variant from another org" do

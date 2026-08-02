@@ -2209,9 +2209,8 @@ RSpec.describe "OfflineSync", type: :request do
       )
     end
 
-    # Undoing a sale is a void (Sprint G), which writes compensating movements rather than
-    # editing history.
-    it "refuses to update or delete a sale" do
+    # The only update a sale takes is a void; anything else would be rewriting history.
+    it "refuses to edit or delete a sale" do
       token, org_id, ids = start!
       sale_id = SecureRandom.uuid
 
@@ -2222,11 +2221,14 @@ RSpec.describe "OfflineSync", type: :request do
       })
       OfflineSync::ProcessPending.call(org_id: org_id)
 
-      push_sale!(token, key: "sale-update", operation: "update", payload: { id: sale_id })
+      push_sale!(token, key: "sale-update", operation: "update",
+                        payload: { id: sale_id, items: [{ variant_id: ids[:variant], quantity: "99", unit_price: "1" }] })
       push_sale!(token, key: "sale-delete", operation: "delete", payload: { id: sale_id })
       OfflineSync::ProcessPending.call(org_id: org_id)
 
-      expect(Sale.find_by(org_id: org_id, id: sale_id)).to be_present
+      sale = Sale.find_by(org_id: org_id, id: sale_id)
+      expect(sale).to be_present
+      expect(sale.status).to eq("completed")
       expect(on_hand(org_id, ids)).to eq(19.to_d)
 
       get "/api/v1/sync/pull", headers: auth_headers(token)
@@ -2234,6 +2236,85 @@ RSpec.describe "OfflineSync", type: :request do
       %w[sale-update sale-delete].each do |key|
         expect(acks).to include(a_hash_including("idempotency_key" => key, "status" => "failed"))
       end
+    end
+
+    # A void rides `update` carrying only the status, the same way a purchase order's transitions
+    # do — the pipeline only speaks create/update/delete.
+    it "voids a sale offline and puts the stock back" do
+      token, org_id, ids = start!
+      sale_id = SecureRandom.uuid
+
+      push_sale!(token, key: "sale-1", payload: {
+        id: sale_id, location_id: ids[:location],
+        items: [{ variant_id: ids[:variant], quantity: "5", unit_price: "2.00" }],
+        payments: [{ method: "cash", amount: "10.00" }]
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+      expect(on_hand(org_id, ids)).to eq(15.to_d)
+
+      push_sale!(token, key: "sale-void", operation: "update",
+                        payload: { id: sale_id, status: "voided", reason: "Wrong item scanned" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(Sale.find(sale_id).status).to eq("voided")
+      expect(on_hand(org_id, ids)).to eq(20.to_d)
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      body = JSON.parse(response.body)
+      expect(body.fetch("acks")).to include(a_hash_including("idempotency_key" => "sale-void", "status" => "applied"))
+      expect(body.fetch("changes")).to include(
+        a_hash_including(
+          "entity" => "sale",
+          "entity_id" => sale_id,
+          "metadata" => a_hash_including(
+            # the restored on-hand rides along, so the till does not have to ask
+            "record" => a_hash_including("status" => "voided", "items" => [a_hash_including("on_hand" => "20.0")])
+          )
+        )
+      )
+    end
+
+    it "replays a void without putting the stock back twice" do
+      token, org_id, ids = start!
+      sale_id = SecureRandom.uuid
+
+      push_sale!(token, key: "sale-1", payload: {
+        id: sale_id, location_id: ids[:location],
+        items: [{ variant_id: ids[:variant], quantity: "5", unit_price: "2.00" }],
+        payments: [{ method: "cash", amount: "10.00" }]
+      })
+      push_sale!(token, key: "void-1", operation: "update", payload: { id: sale_id, status: "voided" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      push_sale!(token, key: "void-1-again", operation: "update", payload: { id: sale_id, status: "voided" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      expect(on_hand(org_id, ids)).to eq(20.to_d)
+      expect(InventoryMovement.where(org_id: org_id, type: "adjustment", reference_id: sale_id).count).to eq(1)
+    end
+
+    it "does not void another org's sale" do
+      token, org_id, ids = start!
+      sale_id = SecureRandom.uuid
+      push_sale!(token, key: "sale-1", payload: {
+        id: sale_id, location_id: ids[:location],
+        items: [{ variant_id: ids[:variant], quantity: "1", unit_price: "1.00" }],
+        payments: [{ method: "cash", amount: "1.00" }]
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      post "/api/v1/orgs", params: {
+        name: "Other Shop",
+        owner: { name: "Other", email: "other@example.com", password: "secret123" }
+      }, as: :json
+      org_b = JSON.parse(response.body)
+
+      push_sale!(org_b.fetch("access_token"), key: "void-x", operation: "update",
+                                              payload: { id: sale_id, status: "voided" })
+      OfflineSync::ProcessPending.call(org_id: org_b.dig("organization", "id"))
+
+      expect(Sale.find(sale_id).status).to eq("completed")
+      expect(on_hand(org_id, ids)).to eq(19.to_d)
     end
 
     it "does not sell another org's stock" do

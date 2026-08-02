@@ -46,6 +46,9 @@ Rails.application.routes.draw do
       end
 
       resources :sales, only: %i[index show create] do
+        # A void is not an edit of the sale — it writes compensating movements — so it gets its
+        # own verb rather than riding PATCH.
+        post :void, on: :member
         resources :sale_items, only: %i[index]
         resources :payments, only: %i[index]
       end

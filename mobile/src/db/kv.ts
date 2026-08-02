@@ -17,6 +17,17 @@ export async function kvGet(key: string): Promise<string | null> {
   return row?.value ?? null;
 }
 
+export async function kvDelete(key: string): Promise<void> {
+  if (Platform.OS === "web") {
+    try {
+      globalThis.localStorage?.removeItem(`${WEB_PREFIX}${key}`);
+    } catch {}
+    return;
+  }
+  const db = await getDb();
+  await db.runAsync("DELETE FROM kv WHERE key = ?", [key]);
+}
+
 export async function kvSet(key: string, value: string): Promise<void> {
   if (Platform.OS === "web") {
     try {

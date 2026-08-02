@@ -15,7 +15,7 @@ module Api
       }.freeze
 
       before_action :authenticate!
-      before_action :load_sale, only: %i[show]
+      before_action :load_sale, only: %i[show void]
 
       rescue_from ArgumentError do |error|
         render_error(
@@ -58,6 +58,22 @@ module Api
         )
 
         render json: { sale: sale_payload(sale, include_items: true, include_payments: true) }, status: :created
+      end
+
+      # Gated on pos.void_sale rather than pos.sell: undoing a sale after the money has been taken
+      # is a supervisor's call in most shops, which is why the two permissions exist separately.
+      def void
+        require_permission!("pos.void_sale")
+        return if performed?
+
+        sale = Sales::VoidSale.call(
+          org_id: current_organization.id,
+          sale_id: @sale.id,
+          voided_by: current_user.id,
+          reason: params[:reason]
+        )
+
+        render json: { sale: sale_payload(sale, include_items: true, include_payments: true) }
       end
 
       private

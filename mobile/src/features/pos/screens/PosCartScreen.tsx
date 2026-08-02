@@ -14,6 +14,7 @@ import {
   saleError,
   type PaymentMethod,
 } from "@/sales/lib/saleTotals";
+import { cartClear, cartLoad, cartSave } from "@/sales/cart";
 import { createSaleOffline } from "@/sync/syncEngine";
 import { AppText, Button, Card, Screen, SelectField, Stack, TextField } from "@/ui/components";
 import { theme } from "@/ui/theme";
@@ -42,19 +43,53 @@ export default function PosCartScreen() {
   const [method, setMethod] = React.useState<PaymentMethod>("cash");
   const [tendered, setTendered] = React.useState("");
   const [busy, setBusy] = React.useState(false);
+  /**
+   * Nothing is written back to the held cart until the held cart has been read. Without this the
+   * save effect fires on the first render with an empty `lines` and wipes the very cart it is
+   * about to restore.
+   */
+  const [hydrated, setHydrated] = React.useState(false);
+  const [restored, setRestored] = React.useState(false);
 
   React.useEffect(() => {
     let cancelled = false;
     (async () => {
-      const rows = await locationsList();
+      const [rows, held] = await Promise.all([locationsList(), cartLoad()]);
       if (cancelled) return;
+
       setLocations(rows);
-      setLocationId((current) => current || (rows[0]?.id ?? ""));
+      const fallback = rows[0]?.id ?? "";
+      // A held cart carries the location it was rung up at — restoring the items but selling them
+      // from somewhere else would take the stock out of the wrong shop.
+      const heldLocation = held?.location_id && rows.some((l) => l.id === held.location_id) ? held.location_id : "";
+      setLocationId((current) => current || heldLocation || fallback);
+
+      if (held && held.lines.length > 0) {
+        setLines(held.lines.map((line) => ({ id: line.variant_id, ...line })));
+        setRestored(true);
+      }
+      setHydrated(true);
     })();
     return () => {
       cancelled = true;
     };
   }, []);
+
+  // Every change to the basket is written straight back, so the durable copy is never more than
+  // one keystroke behind what the cashier can see.
+  React.useEffect(() => {
+    if (!hydrated) return;
+    void cartSave({
+      location_id: locationId,
+      lines: lines.map((line) => ({
+        variant_id: line.variant_id,
+        sku: line.sku,
+        product_name: line.product_name,
+        quantity: line.quantity,
+        unit_price: line.unit_price,
+      })),
+    });
+  }, [hydrated, lines, locationId]);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -144,9 +179,14 @@ export default function PosCartScreen() {
         cashier_id: session?.userId ?? null,
       });
 
+      // The cart became a sale, so the held copy has served its purpose. Cleared explicitly rather
+      // than left to the save effect, so a crash between here and the next render cannot restore
+      // a basket that has already been charged.
+      await cartClear();
       setLines([]);
       setTendered("");
       setQuery("");
+      setRestored(false);
       toast.success("Sale complete. Stock is updated on this device already.", { title: "Sold" });
       router.push(`/(tabs)/pos/receipt/${id}`);
     } catch (e) {
@@ -215,6 +255,9 @@ export default function PosCartScreen() {
 
             <Card title="Cart" subtitle={lines.length === 1 ? "1 line" : `${lines.length} lines`}>
               <Stack gap={12}>
+                {restored && lines.length > 0 ? (
+                  <AppText muted>Picked up where this device left off — nothing has been charged yet.</AppText>
+                ) : null}
                 {lines.length === 0 ? (
                   <AppText muted>Nothing in the cart yet. Search above, or scan an item.</AppText>
                 ) : null}

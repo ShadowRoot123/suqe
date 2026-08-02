@@ -890,11 +890,35 @@ module OfflineSync
       }
     end
 
-    # A sale decrements stock, so like a receipt it can only ever be created. Undoing one is a
-    # void (Sprint G), which writes compensating movements rather than editing history.
+    # A sale decrements stock, so its lines and payments can only ever be created — nothing here
+    # edits them. The one thing that can change afterwards is a **void**, which rides `update`
+    # carrying only `status: "voided"` (the pipeline speaks create/update/delete, the same reason
+    # a purchase order's transitions ride `update`) and writes compensating movements rather than
+    # rewriting history.
     def apply_sale(item)
       payload = normalize_hash(item.payload)
       org_id = item.org_id
+
+      if item.operation == "update"
+        status = fetch_key(payload, :status).to_s.strip.downcase
+        unless status == "voided"
+          return {
+            status: "failed",
+            entity_id: fetch_key(payload, :id),
+            record: payload,
+            error: "Sales are immutable: the only update a sale accepts is a void"
+          }
+        end
+
+        sale = Sales::VoidSale.call(
+          org_id: org_id,
+          sale_id: fetch_key(payload, :id).presence,
+          voided_by: actor_id(org_id, fetch_key(payload, :voided_by) || fetch_key(payload, :cashier_id)),
+          reason: fetch_key(payload, :reason)
+        )
+
+        return { status: "applied", entity_id: sale.id, record: sale_record(sale), error: nil }
+      end
 
       unless item.operation == "create"
         return {
