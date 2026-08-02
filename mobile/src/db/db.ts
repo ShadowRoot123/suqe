@@ -4,7 +4,7 @@ import { Platform } from "react-native";
 export type SqlDatabase = SQLiteDatabase;
 
 let dbPromise: Promise<SqlDatabase> | null = null;
-const SCHEMA_VERSION = 9;
+const SCHEMA_VERSION = 10;
 
 export async function getDb(): Promise<SqlDatabase> {
   if (!dbPromise) dbPromise = openDatabaseAsync("myshop.db");
@@ -140,6 +140,20 @@ export async function migrate() {
       "CREATE INDEX IF NOT EXISTS idx_purchase_receipts_order ON purchase_receipts (purchase_order_id, received_at DESC)"
     );
     current = 9;
+    await db.execAsync(`PRAGMA user_version = ${current}`);
+  }
+
+  if (current < 10) {
+    // Lines and payments both sit in JSON columns for the same reason an order's lines do: they
+    // only ever travel with their sale (one command, one receipt), nothing queries across them,
+    // and one row keeps the write atomic on both platforms.
+    // `synced` mirrors inventory_movements — a sale made offline is real to the shop before the
+    // server has seen it, and the receipt has to render either way.
+    await db.execAsync(
+      "CREATE TABLE IF NOT EXISTS sales (id TEXT PRIMARY KEY NOT NULL, location_id TEXT NOT NULL, cashier_id TEXT, status TEXT NOT NULL DEFAULT 'completed', subtotal TEXT NOT NULL DEFAULT '0.00', discount TEXT NOT NULL DEFAULT '0.00', tax TEXT NOT NULL DEFAULT '0.00', total_amount TEXT NOT NULL DEFAULT '0.00', sold_at TEXT NOT NULL, items_json TEXT NOT NULL DEFAULT '[]', payments_json TEXT NOT NULL DEFAULT '[]', synced INTEGER NOT NULL DEFAULT 0)"
+    );
+    await db.execAsync("CREATE INDEX IF NOT EXISTS idx_sales_sold_at ON sales (sold_at DESC)");
+    current = 10;
     await db.execAsync(`PRAGMA user_version = ${current}`);
   }
 

@@ -29,6 +29,8 @@ import {
   receiptsUpsert,
   type ReceiptLineRow,
 } from "@/purchasing/receipts";
+import { computeSaleTotals, saleError, type PaymentInput } from "@/sales/lib/saleTotals";
+import { salesDelete, salesGetById, salesUpsert, type SaleLineRow, type SalePaymentRow } from "@/sales/sales";
 import { suppliersDelete, suppliersGetById, suppliersUpsert } from "@/purchasing/suppliers";
 import { getDeviceId } from "@/sync/device";
 import { makeIdempotencyKey } from "@/sync/idempotency";
@@ -871,6 +873,112 @@ export async function deletePurchaseOrderOffline(id: string) {
   });
 }
 
+export type CartLineInput = {
+  variant_id: string;
+  quantity: string | number;
+  unit_price: string | number;
+  discount?: string | number | null;
+  tax?: string | number | null;
+};
+
+/**
+ * Finalises a sale. The command the whole offline story is for: the cashier takes the money and
+ * hands over the goods before the server has heard anything, so everything here is written as if
+ * the sale is final — because in the shop it is.
+ *
+ * Validated locally first through the mirror in `sales/lib/saleTotals.ts`, then three local
+ * writes in the shape the pull feed will confirm: the sale, one **unsynced negative `sale`
+ * movement per line** (so on-hand drops immediately, the way an offline adjustment does), and the
+ * outbox command. Each movement takes its line's id, which is what lets a refused sale find and
+ * drop them again.
+ */
+export async function createSaleOffline(args: {
+  location_id: string;
+  items: CartLineInput[];
+  payments: PaymentInput[];
+  cashier_id?: string | null;
+  sold_at?: string | null;
+}) {
+  if (!args.location_id) throw new Error("Choose a location to sell from");
+
+  const lines = args.items.map((line) => ({
+    variant_id: line.variant_id,
+    quantity: line.quantity,
+    unit_price: line.unit_price,
+    discount: line.discount ?? 0,
+    tax: line.tax ?? 0,
+  }));
+
+  const error = saleError({ lines, payments: args.payments });
+  if (error) throw new Error(error);
+
+  const id = makeUuid();
+  const now = new Date().toISOString();
+  const sold_at = args.sold_at ?? now;
+
+  const items: SaleLineRow[] = lines.map((line) => ({
+    id: makeUuid(),
+    variant_id: line.variant_id,
+    quantity: formatQuantity(parseQuantity(line.quantity) ?? 0),
+    unit_price: formatMoney(parseMoney(line.unit_price) ?? 0),
+    discount: formatMoney(parseMoney(line.discount) ?? 0),
+    tax: formatMoney(parseMoney(line.tax) ?? 0),
+  }));
+
+  const payments: SalePaymentRow[] = args.payments.map((payment) => ({
+    id: makeUuid(),
+    method: String(payment.method),
+    amount: formatMoney(parseMoney(payment.amount) ?? 0),
+    reference: null,
+  }));
+
+  const totals = computeSaleTotals(items);
+
+  await salesUpsert({
+    id,
+    location_id: args.location_id,
+    cashier_id: args.cashier_id ?? null,
+    status: "completed",
+    subtotal: totals.subtotal,
+    discount: totals.discount,
+    tax: totals.tax,
+    total_amount: totals.total_amount,
+    sold_at,
+    items,
+    payments,
+    synced: false,
+  });
+
+  for (const line of items) {
+    await movementsUpsert({
+      id: line.id,
+      variant_id: line.variant_id,
+      location_id: args.location_id,
+      type: "sale",
+      // Negative: stock leaves the shop with the customer.
+      quantity_delta: -(parseQuantity(line.quantity) ?? 0),
+      created_at: sold_at,
+      synced: false,
+    });
+  }
+
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("sale"),
+    entity: "sale",
+    operation: "create",
+    payload: {
+      id,
+      location_id: args.location_id,
+      cashier_id: args.cashier_id ?? null,
+      sold_at,
+      items,
+      payments: payments.map((payment) => ({ id: payment.id, method: payment.method, amount: payment.amount })),
+    },
+  });
+
+  return id;
+}
+
 async function applyChanges(changes: SyncPullChange[]) {
   for (const change of changes) {
     const operation = String((change.metadata as any)?.operation ?? "");
@@ -904,6 +1012,16 @@ async function applyChanges(changes: SyncPullChange[]) {
       // movements go. Unlike a refused order update this one *can* repair the status it left
       // behind: the receipts are local, so the order's status is recomputed from the ones that
       // survive — back to `approved` when this was the only one.
+      // A refused sale never happened on the server, so the optimistic sale and the stock it took
+      // out go with it. This is the loudest failure in the app — the shop believes it sold
+      // something the server would not accept — so the till's history has to stop claiming it.
+      if (change.entity === "sale" && operation === "create") {
+        const rejected = await salesGetById(id);
+        if (rejected) {
+          for (const line of rejected.items) await movementsDelete(line.id);
+          await salesDelete(id);
+        }
+      }
       if (change.entity === "purchase_receipt" && operation === "create") {
         const rejected = await receiptsGetById(id);
         if (rejected) {
@@ -1135,6 +1253,60 @@ async function applyChanges(changes: SyncPullChange[]) {
       // The receipt is what settled the order's status, and it travels with it.
       const settled = record?.purchase_order?.status;
       if (settled) await ordersSetStatus(purchase_order_id, String(settled), change.created_at);
+      continue;
+    }
+
+    if (change.entity === "sale") {
+      const location_id = String(record?.location_id ?? "");
+      if (!location_id) continue;
+
+      const items = Array.isArray(record?.items) ? (record.items as any[]) : [];
+      const local = await salesGetById(id);
+
+      await salesUpsert({
+        id,
+        location_id,
+        cashier_id: record?.cashier_id ? String(record.cashier_id) : null,
+        status: record?.status ? String(record.status) : "completed",
+        // The server's totals win: it derived them from the lines it actually stored.
+        subtotal: record?.subtotal ?? null,
+        discount: record?.discount ?? null,
+        tax: record?.tax ?? null,
+        total_amount: record?.total_amount ?? null,
+        sold_at: record?.sold_at ? String(record.sold_at) : change.created_at,
+        items,
+        payments: Array.isArray(record?.payments) ? record.payments : [],
+        synced: true,
+      });
+
+      // Same swap as a receipt's: our optimistic movements are keyed by this device's line ids
+      // and the server's carry its own, so ours go before the server's land — otherwise the
+      // ledger holds both and on-hand drops twice.
+      for (const line of local?.items ?? []) await movementsDelete(line.id);
+
+      for (const line of items) {
+        const variant_id = String(line?.variant_id ?? "");
+        if (!variant_id) continue;
+
+        const movement_id = line?.movement_id ? String(line.movement_id) : "";
+        if (movement_id) {
+          await movementsUpsert({
+            id: movement_id,
+            variant_id,
+            location_id,
+            type: "sale",
+            quantity_delta: -(parseQuantity(line?.quantity) ?? 0),
+            created_at: record?.sold_at ? String(record.sold_at) : change.created_at,
+            synced: true,
+          });
+        }
+
+        // The server sends the on-hand each line landed at, so we don't have to ask for it.
+        const onHand = parseQuantity(line?.on_hand);
+        if (onHand !== null) {
+          await snapshotsSet({ variant_id, location_id, quantity: onHand, updated_at: change.created_at });
+        }
+      }
       continue;
     }
 

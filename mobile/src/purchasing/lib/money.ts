@@ -1,35 +1,12 @@
 import { parseQuantity, QUANTITY_SCALE } from "@/inventory/lib/quantity";
+import { MONEY_FACTOR, parseMoney, roundMoney } from "@/util/money";
 
-// Money mirrors the backend's decimal(12,2). Quantities are decimal(14,3) and go through
+// The money primitives moved to `@/util/money` when sales needed them too — re-exported here so
+// every existing import still resolves. Quantities are decimal(14,3) and go through
 // inventory/lib/quantity, so a line total lands at 5 decimal places before it is rounded.
-export const MONEY_SCALE = 2;
+export { formatMoney, moneyOrZero, MONEY_SCALE, parseMoney, roundMoney } from "@/util/money";
 
-const MONEY_FACTOR = 10 ** MONEY_SCALE;
 const QUANTITY_FACTOR = 10 ** QUANTITY_SCALE;
-
-export function roundMoney(value: number): number {
-  return Math.round(value * MONEY_FACTOR) / MONEY_FACTOR;
-}
-
-/** Parses anything the local store or the server may hand us. Returns null when it isn't a number. */
-export function parseMoney(value: unknown): number | null {
-  if (typeof value === "number") return Number.isFinite(value) ? roundMoney(value) : null;
-  if (typeof value !== "string") return null;
-
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const parsed = Number(trimmed);
-  return Number.isFinite(parsed) ? roundMoney(parsed) : null;
-}
-
-export function moneyOrZero(value: unknown): number {
-  return parseMoney(value) ?? 0;
-}
-
-/** Always two decimals: this is currency, so "12.50" reads better than "12.5". */
-export function formatMoney(value: number): string {
-  return roundMoney(value).toFixed(MONEY_SCALE);
-}
 
 export type OrderLineAmounts = { quantity_ordered: string | number; unit_cost: string | number };
 
