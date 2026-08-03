@@ -113,6 +113,31 @@ export async function movementsDelete(id: string) {
   await db.runAsync("DELETE FROM inventory_movements WHERE id = ?", [id]);
 }
 
+/**
+ * Drops every optimistic row written under a derived id, e.g. `sale_void:<sale_id>:`.
+ *
+ * A void's restore movements have no server id to be keyed by and cannot be keyed by the sale's
+ * line ids either: a void queued behind an unsynced sale outlives those, because folding the
+ * sale's own echo replaces this device's line ids with the server's. The sale id survives that,
+ * so the prefix is the only handle that still finds them when the void's echo lands.
+ */
+export async function movementsDeleteByPrefix(prefix: string) {
+  if (!prefix) return;
+
+  if (Platform.OS === "web") {
+    webWrite(webRead().filter((r) => !r.id.startsWith(prefix)));
+    return;
+  }
+  const db = await getDb();
+  // `\` escapes the `_` and `%` a derived prefix can legitimately contain — without it
+  // `sale_void:` would also match `saleXvoid:`.
+  await db.runAsync("DELETE FROM inventory_movements WHERE id LIKE ? ESCAPE '\\'", [`${escapeLike(prefix)}%`]);
+}
+
+function escapeLike(value: string) {
+  return value.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
 export async function movementsListByVariant(variantId: string, limit = 50): Promise<MovementRow[]> {
   if (Platform.OS === "web") {
     return sortNewestFirst(webRead().filter((r) => r.variant_id === variantId)).slice(0, limit);

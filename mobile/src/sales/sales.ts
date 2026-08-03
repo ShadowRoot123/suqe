@@ -196,6 +196,24 @@ export async function salesUpsert(row: {
   );
 }
 
+/**
+ * The one field of a sale that ever changes. A void does not edit the sale's lines, totals or
+ * payments — it flips the status and writes compensating movements — so this stays deliberately
+ * narrow rather than going through `salesUpsert`, which would re-derive totals from the lines.
+ */
+export async function salesSetStatus(id: string, status: string) {
+  if (Platform.OS === "web") {
+    const rows = webRead();
+    const idx = rows.findIndex((r) => r.id === id);
+    if (idx < 0) return;
+    rows[idx] = { ...rows[idx], status };
+    webWrite(rows);
+    return;
+  }
+  const db = await getDb();
+  await db.runAsync("UPDATE sales SET status = ? WHERE id = ?", [status, id]);
+}
+
 /** Only ever used to drop a local row the server rejected — an applied sale is immutable. */
 export async function salesDelete(id: string) {
   if (Platform.OS === "web") {

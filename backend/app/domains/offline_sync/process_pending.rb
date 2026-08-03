@@ -970,7 +970,11 @@ module OfflineSync
             on_hand: Inventory::OnHand.for(
               org_id: sale.org_id, variant_id: line.fetch(:variant_id), location_id: sale.location_id
             ).to_s,
-            movement_id: movements["sale:#{sale.id}:#{line.fetch(:id)}"]&.id
+            movement_id: movements["sale:#{sale.id}:#{line.fetch(:id)}"]&.id,
+            # Only present once the sale has been voided. The client wrote its own optimistic
+            # restore movements under local ids; without the server's id it could only delete
+            # them, which would leave the device's ledger showing the sale but not its undoing.
+            void_movement_id: movements["sale_void:#{sale.id}:#{line.fetch(:id)}"]&.id
           )
         end,
         payments: Sales::SalePayments.payload(sale)

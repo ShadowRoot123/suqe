@@ -8,7 +8,7 @@ import { variantsDelete, variantsGetById, variantsUpsert } from "@/catalog/varia
 import { kvGet, kvSet } from "@/db/kv";
 import { formatQuantity, parseQuantity } from "@/inventory/lib/quantity";
 import { locationsDelete, locationsGetById, locationsUpsert } from "@/inventory/locations";
-import { movementsDelete, movementsUpsert } from "@/inventory/movements";
+import { movementsDelete, movementsDeleteByPrefix, movementsUpsert } from "@/inventory/movements";
 import { snapshotsSet } from "@/inventory/snapshots";
 import { thresholdsDelete, thresholdsFindTarget, thresholdsUpsert } from "@/inventory/thresholds";
 import { formatMoney, parseMoney } from "@/purchasing/lib/money";
@@ -29,8 +29,16 @@ import {
   receiptsUpsert,
   type ReceiptLineRow,
 } from "@/purchasing/receipts";
+import { voidError } from "@/sales/lib/saleStatus";
 import { computeSaleTotals, saleError, type PaymentInput } from "@/sales/lib/saleTotals";
-import { salesDelete, salesGetById, salesUpsert, type SaleLineRow, type SalePaymentRow } from "@/sales/sales";
+import {
+  salesDelete,
+  salesGetById,
+  salesSetStatus,
+  salesUpsert,
+  type SaleLineRow,
+  type SalePaymentRow,
+} from "@/sales/sales";
 import { suppliersDelete, suppliersGetById, suppliersUpsert } from "@/purchasing/suppliers";
 import { getDeviceId } from "@/sync/device";
 import { makeIdempotencyKey } from "@/sync/idempotency";
@@ -979,7 +987,76 @@ export async function createSaleOffline(args: {
   return id;
 }
 
-async function applyChanges(changes: SyncPullChange[]) {
+/**
+ * The local id a void's optimistic restore movement is written under, mirroring the server's
+ * `sale_void:<sale_id>:<line_id>` idempotency key. Keyed off the **sale** id first so the whole
+ * set can be found again by prefix: a void queued behind an unsynced sale outlives this device's
+ * line ids, because folding the sale's own echo replaces them with the server's.
+ */
+function voidMovementPrefix(saleId: string) {
+  return `sale_void:${saleId}:`;
+}
+
+/**
+ * Undoes a sale. Marked `voided` and every line put back with a compensating movement — the
+ * mirror of `Sales::VoidSale`, which is what the queued command will run on the server.
+ *
+ * Nothing is deleted: the sale keeps its lines, its totals and its payments, and the negative
+ * `sale` movements stay exactly where they are next to the positive ones. The pair is the history,
+ * and a receipt for a voided sale still has to render.
+ *
+ * The compensating movements are typed `adjustment`, not `return` — a return is a customer
+ * bringing goods back, a void is the till correcting itself. Written unsynced, so on-hand climbs
+ * back the moment the supervisor presses the button rather than after the next push.
+ *
+ * Gated on `pos.void_sale` at the screen, not here: the command is refused server-side too.
+ */
+export async function voidSaleOffline(args: { id: string; reason?: string | null; voided_by?: string | null }) {
+  const sale = await salesGetById(args.id);
+  if (!sale) throw new Error("This sale is not on this device.");
+
+  const error = voidError(sale.status);
+  if (error) throw new Error(error);
+  // Already voided: the caller asked for a state the sale is in, and it is. Queueing a second
+  // command would be harmless — the server replays a void without moving stock twice — but the
+  // stock has already been put back locally, so there is nothing to do.
+  if (sale.status === "voided") return;
+
+  const now = new Date().toISOString();
+  const reason = args.reason?.trim() || null;
+
+  await salesSetStatus(sale.id, "voided");
+
+  for (const line of sale.items) {
+    await movementsUpsert({
+      id: `${voidMovementPrefix(sale.id)}${line.id}`,
+      variant_id: line.variant_id,
+      location_id: sale.location_id,
+      type: "adjustment",
+      // The exact opposite of what the sale took out.
+      quantity_delta: parseQuantity(line.quantity) ?? 0,
+      note: reason ?? "Sale voided",
+      created_at: now,
+      synced: false,
+    });
+  }
+
+  await outboxEnqueue({
+    idempotencyKey: makeIdempotencyKey("sale"),
+    entity: "sale",
+    operation: "update",
+    // A void rides `update` carrying only the status; any other update to a sale is refused.
+    payload: { id: sale.id, status: "voided", reason, voided_by: args.voided_by ?? null },
+  });
+}
+
+/**
+ * Folds the pull feed into the local store. Exported for `saleSyncFold.test.ts`: swapping this
+ * device's optimistic movements for the server's is where on-hand gets counted twice if the
+ * bookkeeping is wrong, and a void makes that harder — its restore movements outlive the line ids
+ * they were written against.
+ */
+export async function applyChanges(changes: SyncPullChange[]) {
   for (const change of changes) {
     const operation = String((change.metadata as any)?.operation ?? "");
     const record = (change.metadata as any)?.record;
@@ -1021,6 +1098,16 @@ async function applyChanges(changes: SyncPullChange[]) {
           for (const line of rejected.items) await movementsDelete(line.id);
           await salesDelete(id);
         }
+      }
+      // A refused void put nothing back on the server, so the stock this device optimistically
+      // restored has to come out again. Unlike a refused order update this one repairs the status
+      // it left behind without waiting for a refresh: `completed` is the only state a void can be
+      // refused from, so there is nothing to guess. The prefix delete runs either way — when the
+      // sale's own create was refused a moment earlier the row is already gone, but its restore
+      // movements would otherwise be left behind inflating on-hand.
+      if (change.entity === "sale" && operation === "update") {
+        await movementsDeleteByPrefix(voidMovementPrefix(id));
+        if (await salesGetById(id)) await salesSetStatus(id, "completed");
       }
       if (change.entity === "purchase_receipt" && operation === "create") {
         const rejected = await receiptsGetById(id);
@@ -1283,6 +1370,13 @@ async function applyChanges(changes: SyncPullChange[]) {
       // and the server's carry its own, so ours go before the server's land — otherwise the
       // ledger holds both and on-hand drops twice.
       for (const line of local?.items ?? []) await movementsDelete(line.id);
+      // The same swap for a void's restore movements, by prefix rather than by line id — see
+      // `voidMovementPrefix`. Keyed off the status the server reports rather than off the ids
+      // below, so the optimistic rows go even in the case where a compensating movement did not
+      // come back: leaving them would count the restored stock twice. A *create* echo must not
+      // clear them — the void is still pending, so the stock it put back has to stay put back —
+      // and it does not, because at that point the server still calls the sale completed.
+      if (record?.status === "voided") await movementsDeleteByPrefix(voidMovementPrefix(id));
 
       for (const line of items) {
         const variant_id = String(line?.variant_id ?? "");
@@ -1297,6 +1391,22 @@ async function applyChanges(changes: SyncPullChange[]) {
             type: "sale",
             quantity_delta: -(parseQuantity(line?.quantity) ?? 0),
             created_at: record?.sold_at ? String(record.sold_at) : change.created_at,
+            synced: true,
+          });
+        }
+
+        // The void's compensating movement, under the server's id. Typed `adjustment` because
+        // that is what the server wrote; the sale's own negative movement stays next to it.
+        const void_movement_id = line?.void_movement_id ? String(line.void_movement_id) : "";
+        if (void_movement_id) {
+          await movementsUpsert({
+            id: void_movement_id,
+            variant_id,
+            location_id,
+            type: "adjustment",
+            quantity_delta: parseQuantity(line?.quantity) ?? 0,
+            note: "Sale voided",
+            created_at: change.created_at,
             synced: true,
           });
         }

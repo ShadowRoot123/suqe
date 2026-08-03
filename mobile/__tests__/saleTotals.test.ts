@@ -119,6 +119,21 @@ describe("saleError", () => {
     );
   });
 
+  /**
+   * `SaleLines.decimal`: blank is zero, but something that is not a number at all is an error
+   * rather than a silent zero. Without this a discount typed as "1o" in the cart would quietly
+   * charge the customer full price with nobody told.
+   */
+  test("treats an empty discount as none but refuses one that is not a number", () => {
+    expect(saleError({ lines: [line({ discount: "", tax: "" })], payments: cash("10.00") })).toBeNull();
+    expect(saleError({ lines: [line({ discount: null, tax: undefined })], payments: cash("10.00") })).toBeNull();
+
+    expect(saleError({ lines: [line({ discount: "1o" })], payments: cash("10.00") })).toBe(
+      "discount must be a number"
+    );
+    expect(saleError({ lines: [line({ tax: "abc" })], payments: cash("10.00") })).toBe("tax must be a number");
+  });
+
   // Free goods are a real line.
   test("allows a line at no charge", () => {
     expect(saleError({ lines: [line({ unit_price: "0" })], payments: cash("0.00") })).toMatch(

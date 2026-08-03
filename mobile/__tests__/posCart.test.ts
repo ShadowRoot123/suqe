@@ -49,9 +49,35 @@ describe("held cart (web mode)", () => {
     const held = await cartLoad();
     expect(held?.location_id).toBe(LOCATION);
     expect(held?.lines).toEqual([
-      { variant_id: VARIANT, sku: "COLA-330", product_name: "Cola", quantity: "2", unit_price: "5.00" },
+      {
+        variant_id: VARIANT,
+        sku: "COLA-330",
+        product_name: "Cola",
+        quantity: "2",
+        unit_price: "5.00",
+        discount: "",
+        tax: "",
+      },
     ]);
     expect(held?.updated_at).toBeTruthy();
+  });
+
+  // What was negotiated on a line is part of the basket: restoring the items but not the discount
+  // would quietly charge the customer full price after a restart.
+  test("keeps the discount and tax that were entered on a line", async () => {
+    await cartSave({ location_id: LOCATION, lines: [line({ discount: "1.50", tax: "0.25" })] });
+
+    const held = await cartLoad();
+    expect(held?.lines[0]).toMatchObject({ discount: "1.50", tax: "0.25" });
+  });
+
+  // A restored basket should look like the one that was left. Every line carrying a "0.00"
+  // discount reads as though someone typed it.
+  test("an untouched discount comes back as an empty box, not as 0.00", async () => {
+    await cartSave({ location_id: LOCATION, lines: [line({ discount: "0", tax: "nonsense" })] });
+
+    const held = await cartLoad();
+    expect(held?.lines[0]).toMatchObject({ discount: "", tax: "" });
   });
 
   // Restoring the items but selling them from somewhere else would take stock out of the wrong shop.

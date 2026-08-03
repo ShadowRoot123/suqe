@@ -2274,6 +2274,38 @@ RSpec.describe "OfflineSync", type: :request do
       )
     end
 
+    # The till writes its own optimistic restore movements under local ids. Deleting them and
+    # taking the on-hand alone would leave the device's ledger showing the sale but not its
+    # undoing, so the compensating movement's id rides along the way the sale's own does.
+    it "carries the compensating movement id on a void, and only on a void" do
+      token, org_id, ids = start!
+      sale_id = SecureRandom.uuid
+
+      push_sale!(token, key: "sale-1", payload: {
+        id: sale_id, location_id: ids[:location],
+        items: [{ variant_id: ids[:variant], quantity: "5", unit_price: "2.00" }],
+        payments: [{ method: "cash", amount: "10.00" }]
+      })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      sold_line = JSON.parse(response.body).fetch("changes")
+        .find { |c| c["entity"] == "sale" }.dig("metadata", "record", "items", 0)
+      expect(sold_line.fetch("movement_id")).to be_present
+      expect(sold_line.fetch("void_movement_id")).to be_nil
+
+      push_sale!(token, key: "sale-void", operation: "update", payload: { id: sale_id, status: "voided" })
+      OfflineSync::ProcessPending.call(org_id: org_id)
+
+      get "/api/v1/sync/pull", headers: auth_headers(token)
+      voided_line = JSON.parse(response.body).fetch("changes")
+        .select { |c| c["entity"] == "sale" }.last.dig("metadata", "record", "items", 0)
+      restore = InventoryMovement.find_by!(org_id: org_id, idempotency_key: "sale_void:#{sale_id}:#{sold_line.fetch('id')}")
+      expect(voided_line.fetch("void_movement_id")).to eq(restore.id)
+      # the original sale movement is still there next to it — the pair is the history
+      expect(voided_line.fetch("movement_id")).to eq(sold_line.fetch("movement_id"))
+    end
+
     it "replays a void without putting the stock back twice" do
       token, org_id, ids = start!
       sale_id = SecureRandom.uuid

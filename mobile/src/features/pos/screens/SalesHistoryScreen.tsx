@@ -76,6 +76,9 @@ export default function SalesHistoryScreen() {
               </View>
               <View style={{ alignItems: "flex-end", gap: 4 }}>
                 <AppText variant="h3">{sale.total_amount}</AppText>
+                {/* A voided sale stays in the list — it happened, and its receipt still has to be
+                    findable. It just must not read like takings. */}
+                {sale.status === "voided" ? <Badge tone="danger" label="Voided" /> : null}
                 {sale.synced ? null : <Badge tone="warning" label="Unsynced" />}
               </View>
             </View>

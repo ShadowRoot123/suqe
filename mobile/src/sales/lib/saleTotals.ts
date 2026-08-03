@@ -43,6 +43,11 @@ export function isPaymentMethod(value: unknown): value is PaymentMethod {
   return typeof value === "string" && (PAYMENT_METHODS as readonly string[]).includes(value);
 }
 
+/** What `SaleLines.decimal` treats as "not given" — an empty discount box is not a bad one. */
+function isBlank(value: unknown): boolean {
+  return value === null || value === undefined || (typeof value === "string" && value.trim() === "");
+}
+
 /**
  * Quantity x price on scaled integers (thousandths x cents), so a long cart cannot accumulate
  * float noise the way repeated 0.1 additions do. Not rounded — the caller rounds once at the end.
@@ -110,6 +115,11 @@ export function saleError(args: {
     if (price === null) return "unit_price must be a number";
     // A giveaway is a real line; a negative price is a refund pretending to be a sale.
     if (price < 0) return `${name(line.variant_id)}: unit_price must not be negative`;
+
+    // `SaleLines.decimal`: blank is zero, but something that is not a number at all is an error
+    // rather than a silent zero — otherwise a discount typed as "1o" quietly charges full price.
+    if (!isBlank(line.discount) && parseMoney(line.discount) === null) return "discount must be a number";
+    if (!isBlank(line.tax) && parseMoney(line.tax) === null) return "tax must be a number";
 
     const discount = parseMoney(line.discount) ?? 0;
     const tax = parseMoney(line.tax) ?? 0;

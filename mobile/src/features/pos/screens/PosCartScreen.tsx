@@ -16,12 +16,12 @@ import {
 } from "@/sales/lib/saleTotals";
 import { cartClear, cartLoad, cartSave } from "@/sales/cart";
 import { createSaleOffline } from "@/sync/syncEngine";
-import { AppText, Button, Card, Screen, SelectField, Stack, TextField } from "@/ui/components";
+import { AppText, Button, Card, Divider, Screen, SelectField, Stack, TextField } from "@/ui/components";
 import { theme } from "@/ui/theme";
 import { useToast } from "@/ui/toast";
 import { formatMoney, parseMoney } from "@/util/money";
 
-/** A line in the cart. Quantity stays a string so a half-typed "1." is not clobbered. */
+/** A line in the cart. Amounts stay strings so a half-typed "1." is not clobbered. */
 type CartLine = {
   id: string;
   variant_id: string;
@@ -29,6 +29,9 @@ type CartLine = {
   product_name: string;
   quantity: string;
   unit_price: string;
+  /** Empty means none. Kept blank rather than "0.00" so the boxes read as untouched. */
+  discount: string;
+  tax: string;
 };
 
 export default function PosCartScreen() {
@@ -87,6 +90,8 @@ export default function PosCartScreen() {
         product_name: line.product_name,
         quantity: line.quantity,
         unit_price: line.unit_price,
+        discount: line.discount,
+        tax: line.tax,
       })),
     });
   }, [hydrated, lines, locationId]);
@@ -124,6 +129,8 @@ export default function PosCartScreen() {
           product_name: hit.product_name ?? "Unknown product",
           quantity: "1",
           unit_price: formatMoney(parseMoney(hit.price) ?? 0),
+          discount: "",
+          tax: "",
         },
       ];
     });
@@ -173,6 +180,8 @@ export default function PosCartScreen() {
           variant_id: line.variant_id,
           quantity: line.quantity,
           unit_price: line.unit_price,
+          discount: line.discount,
+          tax: line.tax,
         })),
         // Change given is not a second payment — the drawer takes the total, not the note handed over.
         payments: [{ method, amount: totals.total_amount }],
@@ -268,13 +277,36 @@ export default function PosCartScreen() {
                       {line.sku} · {line.unit_price} each · {formatMoney(lineTotal(line))}
                     </AppText>
                     <View style={{ flexDirection: "row", gap: 12, alignItems: "flex-end", flexWrap: "wrap" }}>
-                      <View style={{ minWidth: 110 }}>
+                      <View style={{ minWidth: 90, flexGrow: 1 }}>
                         <TextField
                           label="Qty"
                           value={line.quantity}
                           onChangeText={(text) => setLine(line.variant_id, { quantity: text })}
                           keyboardType="numeric"
                           autoCapitalize="none"
+                        />
+                      </View>
+                      {/* Both are per line, which is what the contract and the ledger carry — an
+                          order-wide discount would have to be apportioned back onto the lines to
+                          be stored, and apportioning it is the shop's decision, not the till's. */}
+                      <View style={{ minWidth: 90, flexGrow: 1 }}>
+                        <TextField
+                          label="Discount"
+                          value={line.discount}
+                          onChangeText={(text) => setLine(line.variant_id, { discount: text })}
+                          keyboardType="numeric"
+                          autoCapitalize="none"
+                          placeholder="0.00"
+                        />
+                      </View>
+                      <View style={{ minWidth: 90, flexGrow: 1 }}>
+                        <TextField
+                          label="Tax"
+                          value={line.tax}
+                          onChangeText={(text) => setLine(line.variant_id, { tax: text })}
+                          keyboardType="numeric"
+                          autoCapitalize="none"
+                          placeholder="0.00"
                         />
                       </View>
                       <Button title="Remove" variant="ghost" onPress={() => removeLine(line.variant_id)} />
@@ -301,7 +333,15 @@ export default function PosCartScreen() {
                   placeholder={formatMoney(totals.total_amount)}
                 />
                 {change ? <AppText>Change due: {change}</AppText> : null}
-                <AppText variant="h3">Total {formatMoney(totals.total_amount)}</AppText>
+
+                <Divider />
+
+                {/* Only shown once there is something to show: a shop that never discounts should
+                    not read three lines to find the total. */}
+                <TotalRow label="Subtotal" value={formatMoney(totals.subtotal)} />
+                {totals.discount > 0 ? <TotalRow label="Discount" value={`-${formatMoney(totals.discount)}`} /> : null}
+                {totals.tax > 0 ? <TotalRow label="Tax" value={formatMoney(totals.tax)} /> : null}
+                <TotalRow label="Total" value={formatMoney(totals.total_amount)} strong />
                 {error ? (
                   <AppText style={{ color: theme.colors.dangerText }}>{error}</AppText>
                 ) : (
@@ -323,5 +363,16 @@ export default function PosCartScreen() {
         ) : null}
       </Stack>
     </Screen>
+  );
+}
+
+function TotalRow({ label, value, strong }: { label: string; value: string; strong?: boolean }) {
+  return (
+    <View style={{ flexDirection: "row", justifyContent: "space-between", gap: 12 }}>
+      <AppText variant={strong ? "h3" : undefined} muted={!strong}>
+        {label}
+      </AppText>
+      <AppText variant={strong ? "h3" : undefined}>{value}</AppText>
+    </View>
   );
 }

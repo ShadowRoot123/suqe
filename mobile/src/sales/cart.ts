@@ -10,6 +10,12 @@ export type HeldCartLine = {
   product_name: string;
   quantity: string;
   unit_price: string;
+  /**
+   * Per line, matching the sale contract — a restored basket keeps what was negotiated on it.
+   * Empty means none.
+   */
+  discount: string;
+  tax: string;
 };
 
 export type HeldCart = {
@@ -82,5 +88,18 @@ function normalizeLine(line: HeldCartLine): HeldCartLine {
     // the totals.
     quantity: formatQuantity(parseQuantity(line.quantity) ?? 1),
     unit_price: formatMoney(parseMoney(line.unit_price) ?? 0),
+    discount: optionalMoney(line.discount),
+    tax: optionalMoney(line.tax),
   };
+}
+
+/**
+ * Zero comes back as an empty box rather than "0.00": a restored basket should look like the one
+ * that was left, and a line carrying a "0.00" discount reads as though someone typed it. A value
+ * that is not a number at all comes back empty for the same reason — the cashier can see a total
+ * that is wrong, they cannot see a stale 2.50 they never entered.
+ */
+function optionalMoney(value: unknown): string {
+  const parsed = parseMoney(value) ?? 0;
+  return parsed === 0 ? "" : formatMoney(parsed);
 }
