@@ -1,13 +1,17 @@
 module OfflineSync
   class EnqueueBatch
-    def self.call(org_id:, client_id:, commands:)
-      new(org_id:, client_id:, commands:).call
+    # `user` is who is pushing. Required: this is the last point in the lifetime of a command
+    # where a caller is still in scope, so it is where the command's permission is checked —
+    # see `CommandPermissions`.
+    def self.call(org_id:, client_id:, commands:, user:)
+      new(org_id:, client_id:, commands:, user:).call
     end
 
-    def initialize(org_id:, client_id:, commands:)
+    def initialize(org_id:, client_id:, commands:, user:)
       @org_id = org_id
       @client_id = client_id
       @commands = commands
+      @user = user
       @connection = ActiveRecord::Base.connection
     end
 
@@ -18,7 +22,7 @@ module OfflineSync
 
     private
 
-    attr_reader :org_id, :client_id, :connection
+    attr_reader :org_id, :client_id, :connection, :user
 
     def enqueue_one(command)
       command_hash = normalize_hash(command)
@@ -41,6 +45,11 @@ module OfflineSync
         }
       end
 
+      # Refused *before* the insert, so a command the caller may not issue never becomes a stored
+      # intention that `ProcessPending` would later apply with nobody left to ask.
+      denial = permission_error(entity: entity, operation: operation)
+      return { idempotency_key: idempotency_key, status: "invalid", error: denial } if denial
+
       inserted_id = insert_outbox_row(
         idempotency_key: idempotency_key,
         entity: entity,
@@ -54,6 +63,19 @@ module OfflineSync
 
       existing_id = find_outbox_id(idempotency_key: idempotency_key)
       { idempotency_key: idempotency_key, status: "duplicate", outbox_id: existing_id }
+    end
+
+    # nil when the caller may issue this command, otherwise the message to send back. The message
+    # names the missing permission on purpose: the caller is a device belonging to a real member
+    # of the org, and "you need catalog.write" is something an operator can act on, unlike a bare
+    # "forbidden" arriving hours after the command was queued in the field.
+    def permission_error(entity:, operation:)
+      key = CommandPermissions.key_for(entity: entity, operation: operation)
+      return nil if CommandPermissions.permits?(user, key)
+
+      "Forbidden: #{entity} #{operation} requires #{key}"
+    rescue CommandPermissions::UnknownEntity
+      "Unknown entity: #{entity}"
     end
 
     def fetch_key(hash, key)

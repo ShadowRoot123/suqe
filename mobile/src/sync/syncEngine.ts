@@ -88,6 +88,20 @@ export async function pushPending(session: Session) {
     if (!outcome.idempotency_key) continue;
     if (outcome.status === "invalid") {
       await outboxMarkStatusByIdempotencyKey(outcome.idempotency_key, "rejected");
+
+      // The server refused it outright, so it was never stored and will never reach the change
+      // feed — there is no `sync.failed` coming to trigger the usual repair. Undo it here or the
+      // device keeps optimistic state the server has never agreed to: a void refused because
+      // this role lacks `pos.void_sale` would otherwise leave the till showing restored stock
+      // for a sale that is still completed on the server.
+      const row = pending.find((r) => r.idempotency_key === outcome.idempotency_key);
+      if (row) {
+        let payloadId = "";
+        try {
+          payloadId = String(JSON.parse(row.payload)?.id ?? "");
+        } catch {}
+        await undoRefusedCommand({ entity: row.entity, operation: row.operation, id: payloadId });
+      }
       continue;
     }
     await outboxMarkStatusByIdempotencyKey(outcome.idempotency_key, "enqueued");
@@ -1058,6 +1072,80 @@ export async function voidSaleOffline(args: { id: string; reason?: string | null
  * bookkeeping is wrong, and a void makes that harder — its restore movements outlive the line ids
  * they were written against.
  */
+/**
+ * Undoes what a command optimistically wrote, when the server will never apply it.
+ *
+ * Reached two ways. Usually by a `sync.failed` change: the server took the command, refused it,
+ * and said so on the change feed. But a command refused at **push** — because the caller's role
+ * does not carry its permission — is never stored, so it produces no change and no audit row.
+ * Without this shared path a refused void would leave the till showing stock it put back that the
+ * server never restored, silently and forever.
+ */
+async function undoRefusedCommand(args: { entity: string; operation: string; id: string; at?: string }) {
+  const { entity, operation, id } = args;
+  const at = args.at ?? new Date().toISOString();
+  if (!id) return;
+
+  // A rejected adjustment never moved stock on the server, so drop the optimistic row
+  // instead of leaving it pending forever and inflating on-hand.
+  if (entity === "inventory_adjustment" && operation === "create") {
+    await movementsDelete(id);
+  }
+  // Same reasoning for a refused reorder point: nothing was configured on the server, so
+  // leaving the row would show a low-stock badge no other device agrees with.
+  if (entity === "stock_threshold" && operation === "create") {
+    await thresholdsDelete(id);
+  }
+  if (entity === "supplier" && operation === "create") {
+    await suppliersDelete(id);
+  }
+  // A refused order create never landed on the server, so the optimistic row goes. A refused
+  // *update* — a transition another device already made illegal — leaves the local status
+  // ahead of the server's, and the failed change carries the rejected command rather than the
+  // surviving row, so there is nothing here to restore it from. The next purchasing refresh
+  // corrects it; same limitation as a refused location delete.
+  if (entity === "purchase_order" && operation === "create") {
+    await ordersDelete(id);
+  }
+  // A refused sale never happened on the server, so the optimistic sale and the stock it took
+  // out go with it. This is the loudest failure in the app — the shop believes it sold
+  // something the server would not accept — so the till's history has to stop claiming it.
+  if (entity === "sale" && operation === "create") {
+    const rejected = await salesGetById(id);
+    if (rejected) {
+      for (const line of rejected.items) await movementsDelete(line.id);
+      await salesDelete(id);
+    }
+  }
+  // A refused void put nothing back on the server, so the stock this device optimistically
+  // restored has to come out again. Unlike a refused order update this one repairs the status
+  // it left behind without waiting for a refresh: `completed` is the only state a void can be
+  // refused from, so there is nothing to guess. The prefix delete runs either way — when the
+  // sale's own create was refused a moment earlier the row is already gone, but its restore
+  // movements would otherwise be left behind inflating on-hand.
+  if (entity === "sale" && operation === "update") {
+    await movementsDeleteByPrefix(voidMovementPrefix(id));
+    if (await salesGetById(id)) await salesSetStatus(id, "completed");
+  }
+  // A refused receipt never moved stock on the server, so the optimistic receipt and its
+  // movements go. Unlike a refused order update this one *can* repair the status it left
+  // behind: the receipts are local, so the order's status is recomputed from the ones that
+  // survive — back to `approved` when this was the only one.
+  if (entity === "purchase_receipt" && operation === "create") {
+    const rejected = await receiptsGetById(id);
+    if (rejected) {
+      for (const line of rejected.items) await movementsDelete(line.id);
+      await receiptsDelete(id);
+
+      const order = await ordersGetById(rejected.purchase_order_id);
+      if (order) {
+        const surviving = await receiptsListForOrder(order.id);
+        await ordersSetStatus(order.id, statusAfterReceipts(order, surviving), at);
+      }
+    }
+  }
+}
+
 export async function applyChanges(changes: SyncPullChange[]) {
   for (const change of changes) {
     const operation = String((change.metadata as any)?.operation ?? "");
@@ -1066,64 +1154,12 @@ export async function applyChanges(changes: SyncPullChange[]) {
     if (!id) continue;
 
     if (change.action !== "sync.applied") {
-      // A rejected adjustment never moved stock on the server, so drop the optimistic row
-      // instead of leaving it pending forever and inflating on-hand.
-      if (change.entity === "inventory_adjustment" && operation === "create") {
-        await movementsDelete(id);
-      }
-      // Same reasoning for a refused reorder point: nothing was configured on the server, so
-      // leaving the row would show a low-stock badge no other device agrees with.
-      if (change.entity === "stock_threshold" && operation === "create") {
-        await thresholdsDelete(id);
-      }
-      if (change.entity === "supplier" && operation === "create") {
-        await suppliersDelete(id);
-      }
-      // A refused order create never landed on the server, so the optimistic row goes. A refused
-      // *update* — a transition another device already made illegal — leaves the local status
-      // ahead of the server's, and the failed change carries the rejected command rather than the
-      // surviving row, so there is nothing here to restore it from. The next purchasing refresh
-      // corrects it; same limitation as a refused location delete.
-      if (change.entity === "purchase_order" && operation === "create") {
-        await ordersDelete(id);
-      }
-      // A refused receipt never moved stock on the server, so the optimistic receipt and its
-      // movements go. Unlike a refused order update this one *can* repair the status it left
-      // behind: the receipts are local, so the order's status is recomputed from the ones that
-      // survive — back to `approved` when this was the only one.
-      // A refused sale never happened on the server, so the optimistic sale and the stock it took
-      // out go with it. This is the loudest failure in the app — the shop believes it sold
-      // something the server would not accept — so the till's history has to stop claiming it.
-      if (change.entity === "sale" && operation === "create") {
-        const rejected = await salesGetById(id);
-        if (rejected) {
-          for (const line of rejected.items) await movementsDelete(line.id);
-          await salesDelete(id);
-        }
-      }
-      // A refused void put nothing back on the server, so the stock this device optimistically
-      // restored has to come out again. Unlike a refused order update this one repairs the status
-      // it left behind without waiting for a refresh: `completed` is the only state a void can be
-      // refused from, so there is nothing to guess. The prefix delete runs either way — when the
-      // sale's own create was refused a moment earlier the row is already gone, but its restore
-      // movements would otherwise be left behind inflating on-hand.
-      if (change.entity === "sale" && operation === "update") {
-        await movementsDeleteByPrefix(voidMovementPrefix(id));
-        if (await salesGetById(id)) await salesSetStatus(id, "completed");
-      }
-      if (change.entity === "purchase_receipt" && operation === "create") {
-        const rejected = await receiptsGetById(id);
-        if (rejected) {
-          for (const line of rejected.items) await movementsDelete(line.id);
-          await receiptsDelete(id);
-
-          const order = await ordersGetById(rejected.purchase_order_id);
-          if (order) {
-            const surviving = await receiptsListForOrder(order.id);
-            await ordersSetStatus(order.id, statusAfterReceipts(order, surviving), change.created_at);
-          }
-        }
-      }
+      await undoRefusedCommand({
+        entity: String(change.entity ?? ""),
+        operation,
+        id,
+        at: change.created_at,
+      });
       continue;
     }
 

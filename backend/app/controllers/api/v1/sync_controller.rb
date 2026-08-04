@@ -31,10 +31,14 @@ module Api
           )
         end
 
+        # No blanket `require_permission!` here: a push is a *batch*, and which permission each
+        # command needs depends on what it is. `EnqueueBatch` checks them one at a time and
+        # refuses only what this caller may not issue — see `OfflineSync::CommandPermissions`.
         result = OfflineSync::EnqueueBatch.call(
           org_id: current_organization.id,
           client_id: device_id,
-          commands: commands
+          commands: commands,
+          user: current_user
         )
 
         render json: {
