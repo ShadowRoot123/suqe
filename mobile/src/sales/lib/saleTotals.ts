@@ -8,7 +8,7 @@
  * would be worse than useless in a shop.
  */
 import { parseQuantity, QUANTITY_SCALE } from "@/inventory/lib/quantity";
-import { formatMoney, MONEY_FACTOR, parseMoney, roundMoney } from "@/util/money";
+import { formatMoney, MONEY_FACTOR, parseMoney, parseMoneyExact, roundMoney } from "@/util/money";
 
 const QUANTITY_FACTOR = 10 ** QUANTITY_SCALE;
 
@@ -114,7 +114,9 @@ export function saleError(args: {
     const price = parseMoney(line.unit_price);
     if (price === null) return "unit_price must be a number";
     // A giveaway is a real line; a negative price is a refund pretending to be a sale.
-    if (price < 0) return `${name(line.variant_id)}: unit_price must not be negative`;
+    // Tested on the *unrounded* value, as the server does — otherwise -0.004 rounds to zero here
+    // and the till queues a free line the server will refuse. Same for discount and tax below.
+    if ((parseMoneyExact(line.unit_price) ?? 0) < 0) return `${name(line.variant_id)}: unit_price must not be negative`;
 
     // `SaleLines.decimal`: blank is zero, but something that is not a number at all is an error
     // rather than a silent zero — otherwise a discount typed as "1o" quietly charges full price.
@@ -123,8 +125,8 @@ export function saleError(args: {
 
     const discount = parseMoney(line.discount) ?? 0;
     const tax = parseMoney(line.tax) ?? 0;
-    if (discount < 0) return `${name(line.variant_id)}: discount must not be negative`;
-    if (tax < 0) return `${name(line.variant_id)}: tax must not be negative`;
+    if ((parseMoneyExact(line.discount) ?? 0) < 0) return `${name(line.variant_id)}: discount must not be negative`;
+    if ((parseMoneyExact(line.tax) ?? 0) < 0) return `${name(line.variant_id)}: tax must not be negative`;
     // Otherwise the line is worth less than nothing and the sale starts paying the customer.
     if (discount > roundMoney(exactLineSubtotal(line))) {
       return `${name(line.variant_id)}: discount must not be greater than the line total`;

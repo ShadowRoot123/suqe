@@ -119,6 +119,33 @@ RSpec.describe "Purchasing order lifecycle", type: :model do
       expect(order.total_cost).to eq("1.0".to_d)
     end
 
+    # `unit_cost` is decimal(12,2) and `quantity_ordered` decimal(14,3), so anything finer is
+    # rounded to what will be stored *before* the total is derived from it. Summing the unrounded
+    # values instead left `total_cost` a cent away from the sum of the order's own stored lines.
+    # `orderTotals.test.ts` asserts the same case.
+    it "rounds each line to what its column will hold before totalling" do
+      variants = 3.times.map { |i| create_variant!(sku: "SKU-SUBCENT-#{i}") }
+
+      order = create_order!(
+        items: variants.map { |v| { variant_id: v.id, quantity_ordered: "1", unit_cost: "0.005" } }
+      )
+
+      # 0.01 a line, three lines — not the 0.02 that summing 0.005 unrounded would have given.
+      expect(order.total_cost).to eq("0.03".to_d)
+      expect(order.purchase_items.sum("quantity_ordered * unit_cost")).to eq(order.total_cost)
+    end
+
+    # Rounding happens after the sign and zero checks, so an amount that is negative or vanishing
+    # by less than half a unit is still refused rather than rounding quietly into a valid line.
+    it "still refuses amounts that would round away to nothing" do
+      variant = create_variant!(sku: "SKU-TINY")
+
+      expect { create_order!(items: [{ variant_id: variant.id, quantity_ordered: "1", unit_cost: "-0.004" }]) }
+        .to raise_error(ArgumentError, /unit_cost must not be negative/)
+      expect { create_order!(items: [{ variant_id: variant.id, quantity_ordered: "0.0004", unit_cost: "1.00" }]) }
+        .to raise_error(ArgumentError, /quantity_ordered must be greater than zero/)
+    end
+
     # You open the order, then add to it — an empty draft is a normal starting point.
     it "opens an order with no lines at a total of zero" do
       order = create_order!

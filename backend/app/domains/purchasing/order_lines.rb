@@ -45,7 +45,7 @@ module Purchasing
     end
 
     def self.total_for(rows)
-      rows.sum(0.to_d) { |row| row.fetch(:quantity_ordered) * row.fetch(:unit_cost) }.round(2)
+      rows.sum(0.to_d) { |row| row.fetch(:quantity_ordered) * row.fetch(:unit_cost) }.round(ColumnScale::MONEY)
     end
 
     def self.payload(order)
@@ -72,6 +72,15 @@ module Purchasing
       raise ArgumentError, "quantity_ordered must be greater than zero" if quantity.nil? || quantity <= 0
       # Free goods are a real line; a negative cost is not.
       raise ArgumentError, "unit_cost must not be negative" if cost.nil? || cost.negative?
+
+      # Round to what the columns hold before `total_for` derives anything from these, and after
+      # the checks above so a cost of -0.004 stays refused. Summing the unrounded values left an
+      # order's `total_cost` a cent away from the sum of its own stored lines — the same defect
+      # `SaleLines` had, where it also got sales refused. See `ColumnScale`.
+      quantity = ColumnScale.quantity(quantity)
+      cost = ColumnScale.money(cost)
+      # Only reachable from below half a thousandth, which is not a quantity anyone ordered.
+      raise ArgumentError, "quantity_ordered must be greater than zero" if quantity <= 0
 
       { id: fetch(row, :id).presence, variant_id: variant_id, quantity_ordered: quantity, unit_cost: cost }
     end

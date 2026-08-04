@@ -100,6 +100,17 @@ module Purchasing
       cost = raw_cost.nil? || raw_cost.to_s.strip.empty? ? line.unit_cost : decimal(raw_cost, field: "unit_cost")
       raise ArgumentError, "unit_cost must not be negative" if cost.negative?
 
+      # Round to what the columns hold, after the checks above so -0.004 stays refused. It
+      # matters more here than on an order: this quantity is what `check_outstanding!` measures
+      # against the order and what `ReceiveOrder` books into the movement ledger, so comparing
+      # and booking an amount finer than the column can hold means the receipt, the order's
+      # outstanding quantity and the stock on the shelf are three slightly different numbers.
+      # See `ColumnScale`.
+      quantity = ColumnScale.quantity(quantity)
+      cost = ColumnScale.money(cost)
+      # Only reachable from below half a thousandth, which is not a delivery.
+      raise ArgumentError, "quantity_received must be greater than zero" if quantity <= 0
+
       { id: fetch(row, :id).presence, variant_id: variant_id, quantity_received: quantity, unit_cost: cost }
     end
 

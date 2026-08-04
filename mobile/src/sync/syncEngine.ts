@@ -11,7 +11,7 @@ import { locationsDelete, locationsGetById, locationsUpsert } from "@/inventory/
 import { movementsDelete, movementsDeleteByPrefix, movementsUpsert } from "@/inventory/movements";
 import { snapshotsSet } from "@/inventory/snapshots";
 import { thresholdsDelete, thresholdsFindTarget, thresholdsUpsert } from "@/inventory/thresholds";
-import { formatMoney, parseMoney } from "@/purchasing/lib/money";
+import { formatMoney, parseMoney, parseMoneyExact } from "@/purchasing/lib/money";
 import { isEditable, transitionError, type OrderStatus } from "@/purchasing/lib/orderLifecycle";
 import { receiptError, statusAfterReceipts, type ReceiptInputLine } from "@/purchasing/lib/receiving";
 import {
@@ -662,7 +662,9 @@ function normalizeOrderLines(items: PurchaseOrderLineInput[] | undefined): Order
 
     const cost = parseMoney(item.unit_cost);
     if (cost === null) throw new Error("Unit cost must be a number");
-    if (cost < 0) throw new Error("Unit cost must not be negative");
+    // Tested on the unrounded value, as the server does — `parseMoney` rounds, so -0.004 would
+    // read as zero here and queue a free line the server refuses. Same as `saleError`.
+    if ((parseMoneyExact(item.unit_cost) ?? 0) < 0) throw new Error("Unit cost must not be negative");
 
     lines.push({
       id: item.id || makeUuid(),

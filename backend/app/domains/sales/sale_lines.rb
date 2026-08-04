@@ -74,8 +74,18 @@ module Sales
       tax = decimal(fetch(row, :tax), field: "tax") || 0.to_d
       raise ArgumentError, "discount must not be negative" if discount.negative?
       raise ArgumentError, "tax must not be negative" if tax.negative?
+
+      # Round to what the columns will actually hold, before anything is derived from these, and
+      # *after* the sign checks above so -0.004 stays refused. See `ColumnScale` for why.
+      quantity = ColumnScale.quantity(quantity)
+      unit_price = ColumnScale.money(unit_price)
+      discount = ColumnScale.money(discount)
+      tax = ColumnScale.money(tax)
+      # Only reachable from below half a thousandth, which is not a quantity anyone sold.
+      raise ArgumentError, "quantity must be greater than zero" if quantity <= 0
+
       # Otherwise the line is worth less than nothing and the sale total starts paying the customer.
-      if discount > (quantity * unit_price).round(2)
+      if discount > ColumnScale.money(quantity * unit_price)
         raise ArgumentError, "discount must not be greater than the line total"
       end
 

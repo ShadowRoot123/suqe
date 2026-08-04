@@ -28,6 +28,29 @@ describe("purchase order money", () => {
     expect(formatMoney(0.333 * 1)).toBe("0.33");
   });
 
+  /**
+   * The pair to `purchasing_lifecycle_spec.rb`'s "rounds each line to what its column will hold".
+   *
+   * `unit_cost` is decimal(12,2) and `quantity_ordered` decimal(14,3) on both sides. The client
+   * has always rounded to those scales at parse; the server used to sum the unrounded values, so
+   * three lines at 0.005 gave 0.02 there and 0.03 here and an order's total drifted a cent from
+   * the sum of its own stored lines. If either side changes its mind, the two tests disagree.
+   *
+   * The values here are deliberately ones both sides round identically. **They do not always.**
+   * This rounds a float and the server rounds a decimal, so at an exact half they can disagree —
+   * 1.005 is 1.00499… as a double and rounds *down* here while `BigDecimal("1.005").round(2)`
+   * rounds up, and 2.005 goes the other way. It is not reachable through the app: every client
+   * rounds at parse and sends the rounded string, so the server never sees a raw sub-scale value
+   * from a till. Don't "fix" it by making either side round the other's way.
+   */
+  test("rounds each amount to its column's scale, so the server derives the same total", () => {
+    const lines = Array.from({ length: 3 }, () => ({ quantity_ordered: "1", unit_cost: "0.005" }));
+
+    // 0.01 a line, three lines — not the 0.02 that summing 0.005 unrounded would give.
+    expect(formatMoney(computeOrderTotal(lines))).toBe("0.03");
+    expect(formatMoney(computeOrderTotal([{ quantity_ordered: "1.0004", unit_cost: "2.00" }]))).toBe("2.00");
+  });
+
   // 0.1 added ten times as a float is 0.9999999999999999.
   test("a long order does not drift into float noise", () => {
     const lines = Array.from({ length: 10 }, () => ({ quantity_ordered: "1", unit_cost: "0.10" }));

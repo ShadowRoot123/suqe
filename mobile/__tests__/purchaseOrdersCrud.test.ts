@@ -93,6 +93,15 @@ describe("purchase orders CRUD (web mode)", () => {
     expect(await ordersList()).toHaveLength(0);
   });
 
+  // `parseMoney` rounds, so -0.004 read as zero here and queued a free line the server refuses.
+  // The sign is tested on the unrounded value, as the server tests it.
+  test("a cost that is negative by less than half a cent is still refused", async () => {
+    await expect(createDraft([line({ unit_cost: "-0.004" })])).rejects.toThrow("must not be negative");
+    await expect(createDraft([line({ quantity_ordered: "0.0004" })])).rejects.toThrow("greater than zero");
+
+    expect(readOutbox()).toHaveLength(0);
+  });
+
   // Free goods are a real line; the server accepts a zero cost too.
   test("a line at no cost is allowed", async () => {
     const id = await createDraft([line({ unit_cost: "0" })]);

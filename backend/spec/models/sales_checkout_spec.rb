@@ -138,6 +138,55 @@ RSpec.describe Sales::CreateSale, type: :model do
       expect(sale.total_amount).to eq("1.0".to_d)
     end
 
+    # Money is decimal(12,2) and quantity decimal(14,3), so anything finer than that is rounded
+    # to what will be stored *before* the totals are derived from it. Summing the unrounded
+    # values instead left the header disagreeing with the sum of its own lines — and because
+    # every client rounds at parse, the till's payment no longer matched the total the server
+    # derived and the sale was refused. `saleTotals.test.ts` asserts the same cases.
+    it "rounds each line to what its column will hold before deriving anything from it" do
+      variants = 3.times.map { |i| create_variant!(sku: "SKU-SUBCENT-#{i}") }
+      variants.each { |v| stock!(v, 10) }
+
+      sale = sell!(
+        items: variants.map { |v| line(v, quantity: "1", unit_price: "1.00", discount: "0.005") },
+        payments: [{ method: "cash", amount: "2.97" }]
+      )
+
+      # 0.01 a line, three lines — not the 0.02 that summing 0.005 unrounded would have given.
+      expect(sale.discount).to eq("0.03".to_d)
+      expect(sale.total_amount).to eq("2.97".to_d)
+      # The header now agrees with the rows underneath it, which is the point.
+      expect(sale.sale_items.sum(:discount)).to eq(sale.discount)
+    end
+
+    it "rounds a sub-cent tax and a sub-thousandth quantity the same way" do
+      variant = create_variant!(sku: "SKU-ROUND")
+      stock!(variant, 10)
+
+      sale = sell!(
+        items: [line(variant, quantity: "1.0004", unit_price: "2.00", tax: "0.125")],
+        payments: [{ method: "cash", amount: "2.13" }]
+      )
+
+      expect(sale.sale_items.first.quantity).to eq("1.0".to_d)
+      expect(sale.tax).to eq("0.13".to_d)
+      expect(sale.total_amount).to eq("2.13".to_d)
+    end
+
+    # Rounding happens after the sign checks, so a price that is negative by less than half a
+    # cent is still refused rather than rounding quietly to zero and passing.
+    it "still refuses a negative amount that would round away to nothing" do
+      variant = create_variant!(sku: "SKU-TINY")
+      stock!(variant, 10)
+
+      expect { sell!(items: [line(variant, unit_price: "-0.004")], payments: [{ method: "cash", amount: "1.00" }]) }
+        .to raise_error(ArgumentError, /unit_price must not be negative/)
+      expect { sell!(items: [line(variant, quantity: "0.0004")], payments: [{ method: "cash", amount: "1.00" }]) }
+        .to raise_error(ArgumentError, /quantity must be greater than zero/)
+      expect { sell!(items: [line(variant)], payments: [{ method: "cash", amount: "0.004" }]) }
+        .to raise_error(ArgumentError, /amount must be greater than zero/)
+    end
+
     it "allows the same item on two lines at different discounts" do
       variant = create_variant!(sku: "SKU-1")
       stock!(variant, 10)

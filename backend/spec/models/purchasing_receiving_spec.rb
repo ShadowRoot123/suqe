@@ -189,6 +189,35 @@ RSpec.describe Purchasing::ReceiveOrder, type: :model do
     end
   end
 
+  describe "rounding" do
+    # `quantity_received` is decimal(14,3), and it is measured against the order's outstanding
+    # quantity *and* booked into the movement ledger. Comparing and booking an amount finer than
+    # the column holds would make the receipt, the outstanding quantity and the stock on the
+    # shelf three slightly different numbers, so it is rounded before any of that.
+    it "books what the column will hold, and the ledger agrees with the receipt" do
+      variant = create_variant!(sku: "SKU-1")
+      order = approved_order!(items: [{ variant_id: variant.id, quantity_ordered: "10", unit_cost: "2.50" }])
+
+      receipt = receive!(order, items: [{ variant_id: variant.id, quantity_received: "4.0004", unit_cost: "2.505" }])
+
+      line = receipt.purchase_receipt_items.first
+      expect(line.quantity_received).to eq("4.0".to_d)
+      expect(line.unit_cost).to eq("2.51".to_d)
+      # What was booked is what the receipt says, to the last thousandth.
+      expect(on_hand(variant)).to eq(line.quantity_received)
+    end
+
+    it "still refuses a delivery that would round away to nothing" do
+      variant = create_variant!(sku: "SKU-1")
+      order = approved_order!(items: [{ variant_id: variant.id, quantity_ordered: "10", unit_cost: "2.50" }])
+
+      expect { receive!(order, items: [{ variant_id: variant.id, quantity_received: "0.0004" }]) }
+        .to raise_error(ArgumentError, /quantity_received must be greater than zero/)
+      expect(PurchaseReceipt.where(org_id: org.id).count).to eq(0)
+      expect(on_hand(variant)).to eq(0)
+    end
+  end
+
   describe "guards" do
     it "refuses to receive against a draft" do
       variant = create_variant!(sku: "SKU-1")

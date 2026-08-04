@@ -120,6 +120,48 @@ describe("saleError", () => {
   });
 
   /**
+   * The pair to `sales_checkout_spec.rb`'s "rounds each line to what its column will hold".
+   *
+   * Money is decimal(12,2) and quantity decimal(14,3) on both sides. The client has always
+   * rounded to those scales at parse; the server used to sum the unrounded values, so three
+   * lines discounted 0.005 gave 0.02 there and 0.03 here — and a sale rung up on the till was
+   * refused because its payment no longer matched the total the server derived. If either side
+   * changes its mind about this, the two tests disagree.
+   */
+  test("rounds every amount to its column's scale, so the server derives the same total", () => {
+    const subCent = Array.from({ length: 3 }, () => ({
+      variant_id: A,
+      quantity: "1",
+      unit_price: "1.00",
+      discount: "0.005",
+    }));
+
+    expect(computeSaleTotals(subCent)).toEqual({
+      subtotal: 3,
+      // 0.01 a line, three lines — not the 0.02 that summing 0.005 unrounded would give.
+      discount: 0.03,
+      tax: 0,
+      total_amount: 2.97,
+    });
+
+    const rounded = [{ variant_id: A, quantity: "1.0004", unit_price: "2.00", tax: "0.125" }];
+    expect(computeSaleTotals(rounded)).toEqual({ subtotal: 2, discount: 0, tax: 0.13, total_amount: 2.13 });
+  });
+
+  // Rounding must not rescue a value the server would refuse outright.
+  test("an amount that is negative by less than half a cent is still refused", () => {
+    expect(saleError({ lines: [line({ unit_price: "-0.004" })], payments: cash("1.00") })).toMatch(
+      /unit_price must not be negative/
+    );
+    expect(saleError({ lines: [line({ quantity: "0.0004" })], payments: cash("1.00") })).toMatch(
+      /quantity must be greater than zero/
+    );
+    expect(saleError({ lines: [line()], payments: [{ method: "cash", amount: "0.004" }] })).toMatch(
+      /amount must be greater than zero/
+    );
+  });
+
+  /**
    * `SaleLines.decimal`: blank is zero, but something that is not a number at all is an error
    * rather than a silent zero. Without this a discount typed as "1o" in the cart would quietly
    * charge the customer full price with nobody told.

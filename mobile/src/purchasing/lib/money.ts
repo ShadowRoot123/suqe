@@ -4,7 +4,7 @@ import { MONEY_FACTOR, parseMoney, roundMoney } from "@/util/money";
 // The money primitives moved to `@/util/money` when sales needed them too — re-exported here so
 // every existing import still resolves. Quantities are decimal(14,3) and go through
 // inventory/lib/quantity, so a line total lands at 5 decimal places before it is rounded.
-export { formatMoney, moneyOrZero, MONEY_SCALE, parseMoney, roundMoney } from "@/util/money";
+export { formatMoney, moneyOrZero, MONEY_SCALE, parseMoney, parseMoneyExact, roundMoney } from "@/util/money";
 
 const QUANTITY_FACTOR = 10 ** QUANTITY_SCALE;
 

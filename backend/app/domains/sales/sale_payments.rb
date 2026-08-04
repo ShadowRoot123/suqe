@@ -46,6 +46,12 @@ module Sales
       amount = SaleLines.decimal(fetch(row, :amount), field: "amount")
       raise ArgumentError, "amount must be greater than zero" if amount.nil? || amount <= 0
 
+      # Round before the sum above checks it against the total — otherwise what is compared is
+      # not what the drawer ends up holding. A sub-cent amount rounds away to nothing and is not
+      # a payment, hence the second check.
+      amount = ColumnScale.money(amount)
+      raise ArgumentError, "amount must be greater than zero" if amount <= 0
+
       {
         id: fetch(row, :id).presence,
         method: method,
