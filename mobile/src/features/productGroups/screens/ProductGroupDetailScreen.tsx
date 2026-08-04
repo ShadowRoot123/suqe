@@ -2,6 +2,8 @@ import { router, useLocalSearchParams } from "expo-router";
 import React from "react";
 import { Alert, Pressable, View } from "react-native";
 
+import { canIssueCommand } from "@/auth/commandPermissions";
+import { useSession } from "@/auth/session";
 import { productGroupMembershipsListByGroup, type ProductGroupMembershipRow } from "@/catalog/productGroupMemberships";
 import { productGroupsGetById } from "@/catalog/productGroups";
 import { productsList, type ProductRow } from "@/catalog/products";
@@ -12,6 +14,16 @@ import { theme } from "@/ui/theme";
 export default function ProductGroupDetailScreen() {
   const params = useLocalSearchParams<{ id?: string }>();
   const groupId = typeof params.id === "string" ? params.id : "";
+  /**
+   * The route is gated on `catalog.read`, because looking at a group is a read. Every write on
+   * this screen queues a `product_group`/`product_group_membership` command, which the server
+   * refuses without `catalog.write` — so offering the buttons to a reader would only produce
+   * commands rejected at the next push. Same split as the purchase-order detail screen. Asked of
+   * the command map rather than by naming the key, so this cannot drift from what the server
+   * checks.
+   */
+  const { session } = useSession();
+  const canWrite = canIssueCommand(session, "product_group", "update");
 
   const [loading, setLoading] = React.useState(true);
   const [notFound, setNotFound] = React.useState(false);
@@ -94,9 +106,12 @@ export default function ProductGroupDetailScreen() {
       <Stack gap={16}>
         <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
           <AppText variant="h1">{groupName}</AppText>
-          <Button title="Edit" variant="ghost" onPress={() => router.push({ pathname: "/(tabs)/product-groups/[id]/edit", params: { id: groupId } })} />
+          {canWrite ? (
+            <Button title="Edit" variant="ghost" onPress={() => router.push({ pathname: "/(tabs)/product-groups/[id]/edit", params: { id: groupId } })} />
+          ) : null}
         </View>
 
+        {canWrite ? (
         <Card>
           <Stack gap={12}>
             <AppText variant="h2">Add product</AppText>
@@ -127,6 +142,7 @@ export default function ProductGroupDetailScreen() {
             />
           </Stack>
         </Card>
+        ) : null}
 
         <Card>
           <Stack gap={12}>
@@ -157,6 +173,7 @@ export default function ProductGroupDetailScreen() {
                     >
                       <AppText style={{ fontWeight: "800" }}>Variants</AppText>
                     </Pressable>
+                    {canWrite ? (
                     <Pressable
                       disabled={!membership || busy}
                       onPress={() => {
@@ -182,6 +199,7 @@ export default function ProductGroupDetailScreen() {
                     >
                       <AppText style={{ fontWeight: "800", color: "#c62828" }}>Remove</AppText>
                     </Pressable>
+                    ) : null}
                   </View>
                 </View>
               );
@@ -189,6 +207,7 @@ export default function ProductGroupDetailScreen() {
           </Stack>
         </Card>
 
+        {canWrite ? (
         <Button
           title="Delete group"
           variant="secondary"
@@ -214,6 +233,7 @@ export default function ProductGroupDetailScreen() {
             ]);
           }}
         />
+        ) : null}
       </Stack>
     </Screen>
   );

@@ -2,7 +2,7 @@ import { router, useLocalSearchParams } from "expo-router";
 import React from "react";
 import { View } from "react-native";
 
-import { hasPermission } from "@/auth/permissions";
+import { canIssueCommand } from "@/auth/commandPermissions";
 import { useSession } from "@/auth/session";
 import { productsList } from "@/catalog/products";
 import { variantsListAll } from "@/catalog/variants";
@@ -95,7 +95,9 @@ export default function SaleReceiptScreen() {
     };
   }, [id, reload]);
 
-  const canVoid = hasPermission(session, "pos.void_sale");
+  // A void rides `update` on the sale entity, so that is what decides the gate — the same lookup
+  // the server does when the command arrives.
+  const canVoid = canIssueCommand(session, "sale", "update");
 
   const doVoid = React.useCallback(async () => {
     setVoiding(true);

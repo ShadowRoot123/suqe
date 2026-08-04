@@ -2,7 +2,7 @@ import { router, useFocusEffect, useLocalSearchParams } from "expo-router";
 import React from "react";
 import { View } from "react-native";
 
-import { hasPermission } from "@/auth/permissions";
+import { canIssueCommand } from "@/auth/commandPermissions";
 import { useSession } from "@/auth/session";
 import { productsList } from "@/catalog/products";
 import { locationsGetById } from "@/inventory/locations";
@@ -58,8 +58,10 @@ export default function PurchaseOrderDetailScreen() {
   const params = useLocalSearchParams<{ id?: string }>();
   const id = typeof params.id === "string" ? params.id : "";
   const { session } = useSession();
-  const canWrite = hasPermission(session, "purchasing.write");
-  const canReceive = hasPermission(session, "purchasing.receive");
+  // Asked of the command map rather than by naming the keys, so these cannot drift from what the
+  // server checks when the transition or the receipt actually arrives.
+  const canWrite = canIssueCommand(session, "purchase_order", "update");
+  const canReceive = canIssueCommand(session, "purchase_receipt", "create");
 
   const [loading, setLoading] = React.useState(true);
   const [busy, setBusy] = React.useState(false);

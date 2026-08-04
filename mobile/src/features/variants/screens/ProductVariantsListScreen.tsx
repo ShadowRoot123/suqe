@@ -2,6 +2,8 @@ import { router, useLocalSearchParams } from "expo-router";
 import React from "react";
 import { Alert, RefreshControl, View } from "react-native";
 
+import { canIssueCommand } from "@/auth/commandPermissions";
+import { useSession } from "@/auth/session";
 import { productGroupsGetById } from "@/catalog/productGroups";
 import { productsGetById } from "@/catalog/products";
 import { variantsListByProduct, type VariantRow } from "@/catalog/variants";
@@ -28,6 +30,15 @@ export default function ProductVariantsListScreen() {
   const params = useLocalSearchParams<{ id?: string; productId?: string }>();
   const groupId = typeof params.id === "string" ? params.id : "";
   const productId = typeof params.productId === "string" ? params.productId : "";
+  /**
+   * The route is gated on `catalog.read` — listing variants is a read. Creating or deleting one
+   * queues a `variant` command, which the server refuses without `catalog.write`, so a reader is
+   * shown the list and none of the buttons that would only produce rejected commands. Asked of
+   * the command map rather than by naming the key, so this cannot drift from what the server
+   * checks.
+   */
+  const { session } = useSession();
+  const canWrite = canIssueCommand(session, "variant", "create");
 
   const [refreshing, setRefreshing] = React.useState(false);
   const [productName, setProductName] = React.useState<string>("Product");
@@ -82,18 +93,20 @@ export default function ProductVariantsListScreen() {
               {productName}
             </AppText>
           </View>
-          <Button
-            title="Add"
-            onPress={() =>
-              router.push({
-                pathname: "/(tabs)/product-groups/[id]/products/[productId]/variants/create",
-                params: { id: groupId, productId },
-              })
-            }
-          />
+          {canWrite ? (
+            <Button
+              title="Add"
+              onPress={() =>
+                router.push({
+                  pathname: "/(tabs)/product-groups/[id]/products/[productId]/variants/create",
+                  params: { id: groupId, productId },
+                })
+              }
+            />
+          ) : null}
         </View>
 
-        {Object.keys(variantOptions).length > 0 ? (
+        {canWrite && Object.keys(variantOptions).length > 0 ? (
           <Card>
             <Stack gap={10}>
               <AppText variant="h2">Generate from group options</AppText>
@@ -167,6 +180,7 @@ export default function ProductVariantsListScreen() {
                   </AppText>
                 </View>
                 <View style={{ flexDirection: "row", gap: 10 }}>
+                  {canWrite ? (
                   <Button
                     title="Edit"
                     size="sm"
@@ -178,6 +192,8 @@ export default function ProductVariantsListScreen() {
                       })
                     }
                   />
+                  ) : null}
+                  {canWrite ? (
                   <Button
                     title="Delete"
                     size="sm"
@@ -197,6 +213,7 @@ export default function ProductVariantsListScreen() {
                       ]);
                     }}
                   />
+                  ) : null}
                 </View>
               </View>
             ))}

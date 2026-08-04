@@ -202,6 +202,30 @@ RSpec.describe "Permission gates", type: :request do
       expect(outcomes.first.fetch("error")).to match(/wormhole/)
     end
 
+    # The guard for the *next* syncable entity: `ProcessPending` dispatches on a literal entity
+    # name, and adding one there without adding it here would leave it ungated — the exact hole
+    # this slice closed, quietly reopened for one entity. Fails whichever list is short.
+    it "has a permission for every entity the pipeline can apply, and no others" do
+      handled = File.read(Rails.root.join("app/domains/offline_sync/process_pending.rb"))
+        .scan(/item\.entity == "([a-z_]+)"/).flatten.uniq
+
+      expect(handled).not_to be_empty
+      expect(OfflineSync::CommandPermissions::RULES.keys).to match_array(handled)
+    end
+
+    # The mirror the client gates its buttons on. Drift here means a screen offering a button
+    # whose command is refused at the next push — see `mobile/src/auth/commandPermissions.ts`.
+    it "agrees with the client's copy of the map" do
+      mirror = File.read(Rails.root.join("../mobile/src/auth/commandPermissions.ts"))
+
+      OfflineSync::CommandPermissions::RULES.each do |entity, rule|
+        Array(rule.is_a?(Hash) ? rule.values : rule).each do |key|
+          expect(mirror).to include(key), "client mirror is missing #{key} (for #{entity})"
+        end
+        expect(mirror).to match(/\b#{Regexp.escape(entity)}:/), "client mirror is missing entity #{entity}"
+      end
+    end
+
     it "still lets an owner push everything" do
       owner = owner!
 
