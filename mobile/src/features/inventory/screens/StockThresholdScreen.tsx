@@ -1,13 +1,14 @@
+import { Ionicons } from "@expo/vector-icons";
 import { router } from "expo-router";
 import React from "react";
-import { Pressable, RefreshControl, View } from "react-native";
+import { Pressable, RefreshControl, StyleSheet, View } from "react-native";
 
 import { productsList, type ProductRow } from "@/catalog/products";
 import { variantsListAll, variantsSearch, type VariantSearchHit } from "@/catalog/variants";
 import { formatQuantity } from "@/inventory/lib/quantity";
 import { thresholdsFindTarget, thresholdsList, type ThresholdRow } from "@/inventory/thresholds";
 import { deleteStockThresholdOffline, setStockThresholdOffline } from "@/sync/syncEngine";
-import { AppText, Badge, Button, Card, Screen, SelectField, Stack, TextField } from "@/ui/components";
+import { AppText, Badge, Button, Card, Screen, SelectField, SkuTag, Stack, TextField } from "@/ui/components";
 import { DataTable } from "@/ui/table";
 import { theme } from "@/ui/theme";
 import { useToast } from "@/ui/toast";
@@ -154,7 +155,6 @@ export default function StockThresholdScreen() {
   return (
     <Screen scroll refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} />}>
       <Stack gap={16}>
-        <AppText variant="h1">Reorder points</AppText>
         <AppText muted>
           A line is flagged low once on-hand reaches its reorder point. Works offline — the change is queued and the
           alert applies to local stock straight away.
@@ -163,14 +163,14 @@ export default function StockThresholdScreen() {
         <Card title="Item">
           <Stack gap={12}>
             {variant ? (
-              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-                <View style={{ flexShrink: 1 }}>
-                  <AppText variant="label">{variant.product_name ?? "Product"}</AppText>
-                  <AppText muted>{variant.sku}</AppText>
+              <View style={styles.selected}>
+                <View style={{ flex: 1, gap: 6 }}>
+                  <AppText variant="h3">{variant.product_name ?? "Product"}</AppText>
+                  <SkuTag sku={variant.sku} />
                 </View>
                 <Button
                   title="Change"
-                  variant="ghost"
+                  variant="link"
                   onPress={() => {
                     setVariant(null);
                     setQuery("");
@@ -190,13 +190,10 @@ export default function StockThresholdScreen() {
                   <Pressable
                     key={hit.id}
                     onPress={() => setVariant({ id: hit.id, sku: hit.sku, product_name: hit.product_name ?? null })}
-                    style={({ pressed }) => [
-                      { padding: 12, borderRadius: theme.radii.md, backgroundColor: theme.colors.surfaceAlt },
-                      pressed && { opacity: 0.85 },
-                    ]}
+                    style={({ pressed }) => [styles.hit, pressed && { opacity: 0.85 }]}
                   >
-                    <AppText variant="label">{hit.product_name ?? "Product"}</AppText>
-                    <AppText muted>{hit.sku}</AppText>
+                    <AppText variant="h3">{hit.product_name ?? "Product"}</AppText>
+                    <SkuTag sku={hit.sku} />
                   </Pressable>
                 ))}
                 {query.trim().length > 0 && hits.length === 0 ? <AppText muted>No matching items.</AppText> : null}
@@ -236,7 +233,7 @@ export default function StockThresholdScreen() {
             />
 
             {variant && locationId ? (
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
                 <AppText muted>On hand here: {formatQuantity(current?.quantity ?? 0)}</AppText>
                 {existing ? <Badge tone="info" label="Editing existing" /> : null}
               </View>
@@ -249,11 +246,12 @@ export default function StockThresholdScreen() {
               onPress={save}
             />
             {existing ? (
-              <Button title="Remove reorder point" variant="ghost" onPress={() => void remove(existing)} />
+              <Button title="Remove reorder point" variant="danger" disabled={busy} onPress={() => void remove(existing)} />
             ) : null}
           </Stack>
         </Card>
 
+        <AppText variant="h3">Existing reorder points</AppText>
         <DataTable
           emptyTitle="No reorder points yet"
           emptySubtitle="Set one above and the inventory list will flag the line when stock runs down."
@@ -270,7 +268,7 @@ export default function StockThresholdScreen() {
               key: "sku",
               title: "SKU",
               minWidth: 150,
-              render: (l: ThresholdLine) => l.sku,
+              render: (l: ThresholdLine) => <SkuTag sku={l.sku} />,
               sortValue: (l: ThresholdLine) => l.sku,
             },
             {
@@ -298,15 +296,52 @@ export default function StockThresholdScreen() {
               key: "actions",
               title: "",
               minWidth: 110,
-              render: (l: ThresholdLine) => <Button title="Remove" variant="ghost" onPress={() => void remove(l)} />,
+              render: (l: ThresholdLine) => <RemoveButton line={l} onPress={() => void remove(l)} />,
             },
           ]}
+          renderMobileRow={(l: ThresholdLine) => (
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+              <View style={{ flex: 1, gap: 4 }}>
+                <AppText variant="h3">{l.product_name}</AppText>
+                <AppText variant="caption">
+                  {l.location_label} · point {l.reorder_point} · qty {l.reorder_quantity ?? "—"}
+                </AppText>
+              </View>
+              <RemoveButton line={l} onPress={() => void remove(l)} />
+            </View>
+          )}
           rows={lines}
           getRowId={(l: ThresholdLine) => l.id}
         />
 
-        <Button title="Back to inventory" variant="ghost" onPress={() => router.push("/(tabs)/inventory")} />
+        <Button title="Back to inventory" variant="secondary" onPress={() => router.push("/(tabs)/inventory")} />
       </Stack>
     </Screen>
   );
 }
+
+function RemoveButton({ line, onPress }: { line: ThresholdLine; onPress: () => void }) {
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`Remove reorder point for ${line.product_name} at ${line.location_label}`}
+      style={styles.iconButton}
+    >
+      <Ionicons name="trash-outline" size={20} color={theme.colors.muted} />
+    </Pressable>
+  );
+}
+
+const styles = StyleSheet.create({
+  selected: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing.sm,
+    padding: theme.spacing.sm,
+    borderRadius: theme.radii.md,
+    backgroundColor: theme.colors.surfaceAlt,
+  },
+  hit: { gap: 6, padding: theme.spacing.sm, borderRadius: theme.radii.md, backgroundColor: theme.colors.surfaceAlt },
+  iconButton: { minWidth: 44, minHeight: 44, alignItems: "center", justifyContent: "center" },
+});

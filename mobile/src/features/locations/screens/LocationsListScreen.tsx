@@ -1,11 +1,13 @@
+import { Ionicons } from "@expo/vector-icons";
 import { router, useFocusEffect } from "expo-router";
 import React from "react";
-import { RefreshControl, View } from "react-native";
+import { RefreshControl, StyleSheet, View } from "react-native";
 
 import { hasPermission } from "@/auth/permissions";
 import { useSession } from "@/auth/session";
-import { AppText, Badge, Button, Screen, Stack } from "@/ui/components";
+import { AppText, Badge, Button, Notice, Screen, Stack } from "@/ui/components";
 import { DataTable } from "@/ui/table";
+import { theme } from "@/ui/theme";
 
 import { useLocationsData, type LocationLine } from "../hooks/useLocationsData";
 
@@ -28,21 +30,24 @@ export default function LocationsListScreen() {
   return (
     <Screen scroll refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} />}>
       <Stack gap={16}>
-        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
-          <AppText variant="h1">Locations</AppText>
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+          <AppText muted style={{ flex: 1 }}>
+            Shops and warehouses stock is counted against. Works offline — new locations sync on the next push.
+          </AppText>
           {canWrite ? (
-            <Button title="Add location" onPress={() => router.push("/(tabs)/inventory/locations/create")} />
+            <Button
+              title="Add"
+              left={<Ionicons name="add" size={18} color={theme.colors.primaryText} />}
+              accessibilityLabel="Add location"
+              onPress={() => router.push("/(tabs)/inventory/locations/create")}
+            />
           ) : null}
         </View>
 
-        <AppText muted>
-          Shops and warehouses stock is counted against. Works offline — new locations sync on the next push.
-        </AppText>
-
         {pendingCount > 0 ? (
-          <AppText muted>
+          <Notice tone="warning">
             {pendingCount} {pendingCount === 1 ? "location is" : "locations are"} waiting to sync.
-          </AppText>
+          </Notice>
         ) : null}
 
         <DataTable
@@ -76,26 +81,43 @@ export default function LocationsListScreen() {
               render: (l: LocationLine) => l.address ?? "—",
               sortValue: (l: LocationLine) => l.address ?? "",
             },
-            {
-              key: "actions",
-              title: "",
-              minWidth: 110,
-              render: (l: LocationLine) =>
-                canWrite ? (
-                  <Button
-                    title="Edit"
-                    variant="ghost"
-                    onPress={() => router.push(`/(tabs)/inventory/locations/${l.id}`)}
-                  />
-                ) : (
-                  "—"
-                ),
-            },
           ]}
           rows={locations}
           getRowId={(l: LocationLine) => l.id}
+          onRowPress={canWrite ? (l: LocationLine) => router.push(`/(tabs)/inventory/locations/${l.id}`) : undefined}
+          renderMobileRow={(l: LocationLine) => (
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+              <View style={styles.tile}>
+                <Ionicons
+                  name={l.type === "warehouse" ? "cube-outline" : "storefront-outline"}
+                  size={20}
+                  color={theme.colors.primaryStrong}
+                />
+              </View>
+              <View style={{ flex: 1, gap: 4 }}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <AppText variant="h3">{l.name}</AppText>
+                  {l.pending ? <Badge tone="warning" label="Unsynced" /> : null}
+                </View>
+                <AppText variant="caption">
+                  {TYPE_LABEL[l.type] ?? l.type} · {l.address || "No address"}
+                </AppText>
+              </View>
+            </View>
+          )}
         />
       </Stack>
     </Screen>
   );
 }
+
+const styles = StyleSheet.create({
+  tile: {
+    width: 40,
+    height: 40,
+    borderRadius: theme.radii.md,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: theme.colors.primarySoft,
+  },
+});

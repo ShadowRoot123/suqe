@@ -12,11 +12,11 @@ export type BadgeProps = ViewProps & {
 };
 
 const TONE = {
-  neutral: { bg: theme.colors.surfaceAlt, border: theme.colors.border, text: theme.colors.textSecondary },
-  info: { bg: theme.colors.infoBg, border: theme.colors.infoBg, text: theme.colors.infoText },
-  success: { bg: theme.colors.successBg, border: theme.colors.successBg, text: theme.colors.successText },
-  warning: { bg: theme.colors.warningBg, border: theme.colors.warningBg, text: theme.colors.warningText },
-  danger: { bg: theme.colors.dangerBg, border: theme.colors.dangerBg, text: theme.colors.dangerText },
+  neutral: { bg: theme.colors.surfaceAlt, border: theme.colors.border, text: theme.colors.textSecondary, dot: theme.colors.muted },
+  info: { bg: theme.colors.infoBg, border: theme.colors.infoBg, text: theme.colors.infoText, dot: theme.colors.info },
+  success: { bg: theme.colors.successBg, border: theme.colors.successBg, text: theme.colors.successText, dot: theme.colors.success },
+  warning: { bg: theme.colors.warningBg, border: theme.colors.warningBg, text: theme.colors.warningText, dot: theme.colors.warning },
+  danger: { bg: theme.colors.dangerBg, border: theme.colors.dangerBg, text: theme.colors.dangerText, dot: theme.colors.danger },
 } as const;
 
 export function Badge({ label, tone = "neutral", style, ...props }: BadgeProps) {
@@ -26,6 +26,8 @@ export function Badge({ label, tone = "neutral", style, ...props }: BadgeProps) 
       {...props}
       style={[styles.base, { backgroundColor: palette.bg, borderColor: palette.border }, style]}
     >
+      {/* A shape mark as well as a colour, so the tone never rests on colour alone. */}
+      <View style={[styles.dot, { backgroundColor: palette.dot }]} />
       <AppText variant="caption" style={[styles.text, { color: palette.text }]}>
         {label}
       </AppText>
@@ -39,6 +41,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     paddingHorizontal: 10,
     paddingVertical: 4,
+    flexDirection: "row",
+    alignItems: "center",
+    alignSelf: "flex-start",
+    gap: 6,
   },
+  dot: { width: 8, height: 8, borderRadius: 4 },
   text: { fontWeight: theme.typography.weight.semibold },
 });

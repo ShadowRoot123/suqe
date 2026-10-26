@@ -4,7 +4,7 @@ import { ActivityIndicator, Pressable, StyleSheet, type PressableProps, View } f
 import { AppText } from "@/ui/components/AppText";
 import { theme } from "@/ui/theme";
 
-export type ButtonVariant = "primary" | "secondary" | "ghost";
+export type ButtonVariant = "primary" | "secondary" | "ghost" | "danger" | "link";
 export type ButtonSize = "sm" | "md" | "lg";
 
 export type ButtonProps = Omit<PressableProps, "children"> & {
@@ -30,8 +30,10 @@ export function Button({
   const isDisabled = disabled || loading;
   return (
     <Pressable
+      accessibilityRole="button"
       {...props}
       disabled={isDisabled}
+      accessibilityState={{ disabled: !!isDisabled, busy: !!loading }}
       style={({ pressed }) => [
         styles.base,
         size === "sm" && styles.sm,
@@ -40,6 +42,8 @@ export function Button({
         variant === "primary" && styles.primary,
         variant === "secondary" && styles.secondary,
         variant === "ghost" && styles.ghost,
+        variant === "danger" && styles.danger,
+        variant === "link" && styles.ghost,
         isDisabled && styles.disabled,
         pressed && !isDisabled && styles.pressed,
         typeof style === "function" ? style({ pressed }) : style,
@@ -56,6 +60,8 @@ export function Button({
           style={[
             styles.label,
             variant === "primary" ? styles.labelPrimary : styles.labelDefault,
+            variant === "danger" && styles.labelDanger,
+            variant === "link" && styles.labelLink,
             size === "sm" && styles.labelSm,
             size === "lg" && styles.labelLg,
           ]}
@@ -83,11 +89,14 @@ const styles = StyleSheet.create({
   primary: { backgroundColor: theme.colors.primary, borderColor: theme.colors.primary },
   secondary: { backgroundColor: theme.colors.surface, borderColor: theme.colors.borderStrong },
   ghost: { backgroundColor: "transparent", borderColor: "transparent" },
+  danger: { backgroundColor: theme.colors.surface, borderColor: theme.colors.danger },
   disabled: { opacity: 0.5 },
   pressed: { opacity: 0.85 },
   label: { fontWeight: theme.typography.weight.semibold },
   labelDefault: { color: theme.colors.textSecondary },
   labelPrimary: { color: theme.colors.primaryText },
+  labelDanger: { color: theme.colors.dangerText },
+  labelLink: { color: theme.colors.primaryStrong },
   labelSm: { fontSize: theme.typography.size.sm },
   labelLg: { fontSize: theme.typography.size.lg },
 });

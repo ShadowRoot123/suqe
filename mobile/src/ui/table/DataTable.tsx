@@ -1,3 +1,4 @@
+import { Ionicons } from "@expo/vector-icons";
 import React from "react";
 import { FlatList, Pressable, ScrollView, StyleSheet, View } from "react-native";
 
@@ -37,6 +38,8 @@ export type DataTableProps<T> = {
   emptySubtitle?: string;
   sort?: DataTableSort;
   pagination?: DataTablePagination;
+  /** Phone layout for one row. Without it, phones get a label/value card per row. */
+  renderMobileRow?: (row: T) => React.ReactNode;
 };
 
 function renderCell(value: React.ReactNode) {
@@ -55,6 +58,7 @@ export function DataTable<T>({
   emptySubtitle,
   sort,
   pagination,
+  renderMobileRow,
 }: DataTableProps<T>) {
   const bp = useBreakpoint();
 
@@ -63,6 +67,25 @@ export function DataTable<T>({
   if (rows.length === 0) return <EmptyState title={emptyTitle ?? "No results"} subtitle={emptySubtitle} />;
 
   const mobileColumns = columns.filter((c) => !c.hideOnMobile);
+
+  if (bp.isMobile && renderMobileRow) {
+    return (
+      <View style={styles.list}>
+        {rows.map((r, i) => (
+          <Pressable
+            key={getRowId(r)}
+            onPress={onRowPress ? () => onRowPress(r) : undefined}
+            disabled={!onRowPress}
+            accessibilityRole={onRowPress ? "button" : undefined}
+            style={({ pressed }) => [styles.listRow, i > 0 && styles.listDivider, pressed && styles.pressed]}
+          >
+            <View style={{ flex: 1 }}>{renderMobileRow(r)}</View>
+            {onRowPress ? <Ionicons name="chevron-forward" size={18} color={theme.colors.muted} /> : null}
+          </Pressable>
+        ))}
+      </View>
+    );
+  }
 
   if (bp.isMobile) {
     return (
@@ -107,8 +130,7 @@ export function DataTable<T>({
               );
               const cellStyle = [
                 styles.headerCell,
-                c.width ? { width: c.width } : null,
-                c.minWidth ? { minWidth: c.minWidth } : null,
+                { width: c.width ?? c.minWidth ?? 160 },
               ];
 
               return sortable && sort ? (
@@ -121,6 +143,7 @@ export function DataTable<T>({
                 </View>
               );
             })}
+            {onRowPress ? <View style={styles.chevronCell} /> : null}
           </View>
           <Divider />
           {rows.map((r) => (
@@ -131,13 +154,18 @@ export function DataTable<T>({
                     key={c.key}
                     style={[
                       styles.dataCell,
-                      c.width ? { width: c.width } : null,
-                      c.minWidth ? { minWidth: c.minWidth } : null,
+                      // A fixed width per column keeps every row's cells under its header.
+                      { width: c.width ?? c.minWidth ?? 160 },
                     ]}
                   >
                     {renderCell(c.render(r))}
                   </View>
                 ))}
+                {onRowPress ? (
+                  <View style={styles.chevronCell}>
+                    <Ionicons name="chevron-forward" size={18} color={theme.colors.muted} />
+                  </View>
+                ) : null}
               </View>
               <Divider />
             </Pressable>
@@ -174,11 +202,22 @@ export function DataTable<T>({
 const styles = StyleSheet.create({
   tableWrap: { overflow: "hidden" },
   headerRow: { flexDirection: "row", paddingVertical: 10, backgroundColor: theme.colors.surfaceAlt },
-  headerCell: { paddingHorizontal: 12, minWidth: 160 },
+  headerCell: { paddingHorizontal: 12 },
   headerText: { fontWeight: theme.typography.weight.bold, color: theme.colors.muted },
   sortable: { color: theme.colors.text },
-  dataRow: { flexDirection: "row", paddingVertical: 12 },
-  dataCell: { paddingHorizontal: 12, minWidth: 160 },
+  dataRow: { flexDirection: "row", alignItems: "center", paddingVertical: 12 },
+  chevronCell: { width: 44, alignItems: "center" },
+  list: {
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.radii.lg,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    overflow: "hidden",
+  },
+  listRow: { flexDirection: "row", alignItems: "center", gap: theme.spacing.sm, padding: theme.spacing.md, minHeight: 56 },
+  listDivider: { borderTopWidth: 1, borderTopColor: theme.colors.border },
+  pressed: { backgroundColor: theme.colors.surfaceAlt },
+  dataCell: { paddingHorizontal: 12 },
   footer: { padding: 12 },
 });
 

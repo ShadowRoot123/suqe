@@ -189,8 +189,9 @@ export default function SaleReceiptScreen() {
 
         {sale.synced ? null : (
           <AppText muted>
-            This sale is queued and will sync when you are back online. The goods have left and the stock on this
-            device already reflects it.
+            {sale.status === "voided"
+              ? "The void is queued and will sync when you are back online."
+              : "This sale is queued and will sync when you are back online. The goods have left and the stock on this device already reflects it."}
           </AppText>
         )}
 

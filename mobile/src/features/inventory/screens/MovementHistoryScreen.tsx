@@ -8,8 +8,10 @@ import { variantsListAll } from "@/catalog/variants";
 import { formatQuantity, quantityOrZero } from "@/inventory/lib/quantity";
 import { locationsList } from "@/inventory/locations";
 import { movementsListRecent } from "@/inventory/movements";
-import { AppText, Badge, Button, Chip, Screen, Stack } from "@/ui/components";
+import { AppText, Badge, Button, Chip, Notice, Screen, SkuTag, Stack } from "@/ui/components";
+import type { BadgeTone } from "@/ui/components/Badge";
 import { DataTable } from "@/ui/table";
+import { theme } from "@/ui/theme";
 
 const PAGE_SIZE = 50;
 
@@ -20,6 +22,12 @@ const TYPE_LABEL: Record<string, string> = {
   adjustment: "Adjustment",
   transfer_out: "Transfer out",
   transfer_in: "Transfer in",
+};
+
+const TYPE_TONE: Record<string, BadgeTone> = {
+  purchase: "success",
+  sale: "info",
+  return: "warning",
 };
 
 type HistoryLine = {
@@ -40,7 +48,27 @@ type HistoryLine = {
 function formatWhen(iso: string) {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return iso;
-  return date.toLocaleString();
+  return date.toLocaleString(undefined, { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+function TypeBadge({ type }: { type: string }) {
+  return <Badge tone={TYPE_TONE[type] ?? "neutral"} label={TYPE_LABEL[type] ?? type} />;
+}
+
+function Delta({ value, large }: { value: string; large?: boolean }) {
+  const delta = quantityOrZero(value);
+  return (
+    <AppText
+      style={{
+        color: delta < 0 ? theme.colors.dangerText : theme.colors.successText,
+        fontWeight: theme.typography.weight.bold,
+        fontSize: large ? theme.typography.size.xl : theme.typography.size.md,
+      }}
+    >
+      {delta > 0 ? "+" : delta < 0 ? "−" : ""}
+      {formatQuantity(Math.abs(delta))}
+    </AppText>
+  );
 }
 
 /**
@@ -172,12 +200,8 @@ export default function MovementHistoryScreen() {
   return (
     <Screen scroll refreshControl={<RefreshControl refreshing={loading} onRefresh={() => void load()} />}>
       <Stack gap={16}>
-        <AppText variant="h1">Movement history</AppText>
         {source === "local" ? (
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <Badge tone="warning" label="Offline" />
-            <AppText muted>Showing the movements stored on this device.</AppText>
-          </View>
+          <Notice tone="warning">Offline — showing the movements stored on this device.</Notice>
         ) : (
           <AppText muted>Every stock movement, newest first.</AppText>
         )}
@@ -202,9 +226,8 @@ export default function MovementHistoryScreen() {
             />
           ))}
           {typeFilter || locationFilter ? (
-            <Button
-              title="Reset"
-              variant="ghost"
+            <Chip
+              label="Reset"
               onPress={() => {
                 setTypeFilter(null);
                 setLocationFilter(null);
@@ -241,7 +264,7 @@ export default function MovementHistoryScreen() {
               title: "SKU",
               minWidth: 150,
               hideOnMobile: true,
-              render: (l: HistoryLine) => l.sku,
+              render: (l: HistoryLine) => <SkuTag sku={l.sku} />,
             },
             {
               key: "location",
@@ -254,16 +277,13 @@ export default function MovementHistoryScreen() {
               title: "Type",
               minWidth: 140,
               hideOnMobile: true,
-              render: (l: HistoryLine) => TYPE_LABEL[l.type] ?? l.type,
+              render: (l: HistoryLine) => <TypeBadge type={l.type} />,
             },
             {
               key: "quantity_delta",
               title: "Change",
               minWidth: 120,
-              render: (l: HistoryLine) => {
-                const delta = quantityOrZero(l.quantity_delta);
-                return `${delta > 0 ? "+" : ""}${formatQuantity(delta)}`;
-              },
+              render: (l: HistoryLine) => <Delta value={l.quantity_delta} />,
             },
             {
               key: "note",
@@ -275,6 +295,26 @@ export default function MovementHistoryScreen() {
           ]}
           rows={lines}
           getRowId={(l: HistoryLine) => l.id}
+          renderMobileRow={(l: HistoryLine) => (
+            <View style={{ gap: 6 }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                <TypeBadge type={l.type} />
+                <AppText variant="caption" style={{ flex: 1 }}>
+                  {formatWhen(l.created_at)}
+                </AppText>
+                <Delta value={l.quantity_delta} large />
+              </View>
+              <AppText variant="h3">{l.product_name}</AppText>
+              <SkuTag sku={l.sku} />
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <AppText variant="caption" style={{ color: theme.colors.textSecondary }}>
+                  {l.location_name}
+                </AppText>
+                {l.pending ? <Badge tone="warning" label="Unsynced" /> : null}
+              </View>
+              {l.note ? <AppText variant="caption">{l.note}</AppText> : null}
+            </View>
+          )}
         />
 
         {cursor ? (

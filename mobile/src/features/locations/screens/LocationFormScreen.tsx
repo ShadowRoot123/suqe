@@ -8,7 +8,7 @@ import {
   updateLocationOffline,
   type LocationType,
 } from "@/sync/syncEngine";
-import { AppText, Button, Card, Screen, SelectField, Stack, TextField } from "@/ui/components";
+import { AppText, Button, Card, Notice, Screen, SelectField, Stack, TextField } from "@/ui/components";
 import { useToast } from "@/ui/toast";
 
 const TYPE_OPTIONS: { value: LocationType; label: string }[] = [
@@ -25,6 +25,7 @@ export default function LocationFormScreen({ mode }: { mode: "create" | "edit" }
   const [loading, setLoading] = React.useState(isEdit);
   const [notFound, setNotFound] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
+  const [confirmingDelete, setConfirmingDelete] = React.useState(false);
 
   const [name, setName] = React.useState("");
   const [type, setType] = React.useState<LocationType>("shop");
@@ -89,8 +90,6 @@ export default function LocationFormScreen({ mode }: { mode: "create" | "edit" }
   return (
     <Screen scroll>
       <Stack gap={16}>
-        <AppText variant="h1">{isEdit ? "Edit location" : "New location"}</AppText>
-
         {loading ? <AppText muted>Loading…</AppText> : null}
         {notFound ? <AppText muted>Location not found.</AppText> : null}
 
@@ -122,18 +121,35 @@ export default function LocationFormScreen({ mode }: { mode: "create" | "edit" }
 
             <Button
               title={busy ? "Saving…" : isEdit ? "Save changes" : "Add location"}
+              size="lg"
               disabled={!canSave}
               loading={busy}
               onPress={save}
             />
 
             {isEdit ? (
-              <Button title="Delete location" variant="secondary" disabled={busy} onPress={remove} />
+              <Card title="Delete this location">
+                <Stack gap={12}>
+                  <AppText muted>
+                    Deleting removes {name || "this location"} from the location picker. Stock history stays — the
+                    server keeps any location that has movements, so this may be refused.
+                  </AppText>
+                  {confirmingDelete ? (
+                    <Stack gap={8}>
+                      <Notice tone="danger" title="This cannot be undone." />
+                      <Button title={`Delete ${name || "location"}`} variant="danger" disabled={busy} onPress={remove} />
+                      <Button title="Keep this location" variant="link" onPress={() => setConfirmingDelete(false)} />
+                    </Stack>
+                  ) : (
+                    <Button title="Delete location" variant="danger" disabled={busy} onPress={() => setConfirmingDelete(true)} />
+                  )}
+                </Stack>
+              </Card>
             ) : null}
           </>
         ) : null}
 
-        <Button title="Cancel" variant="ghost" onPress={() => router.back()} />
+        <Button title="Cancel" variant="link" onPress={() => router.back()} />
       </Stack>
     </Screen>
   );

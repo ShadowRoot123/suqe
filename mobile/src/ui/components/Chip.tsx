@@ -13,6 +13,8 @@ export type ChipProps = Omit<PressableProps, "children"> & {
 export function Chip({ label, selected, left, style, ...props }: ChipProps) {
   return (
     <Pressable
+      accessibilityRole="button"
+      accessibilityState={{ selected: !!selected }}
       {...props}
       style={({ pressed }) => [
         styles.base,
@@ -39,11 +41,13 @@ const styles = StyleSheet.create({
     borderRadius: 999,
     paddingHorizontal: 10,
     paddingVertical: 8,
+    minHeight: 44,
+    justifyContent: "center",
   },
-  selected: { backgroundColor: theme.colors.activeBg, borderColor: theme.colors.text },
+  selected: { backgroundColor: theme.colors.primary, borderColor: theme.colors.primary },
   pressed: { opacity: 0.85 },
   inner: { flexDirection: "row", alignItems: "center", gap: 8 },
   text: { color: theme.colors.text, fontWeight: theme.typography.weight.semibold },
-  textSelected: { color: theme.colors.text },
+  textSelected: { color: theme.colors.primaryText },
 });
 
